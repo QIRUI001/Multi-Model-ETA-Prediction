@@ -267,57 +267,144 @@ class VoyageETADataset:
         log_target = normalized * self.target_std + self.target_mean
         return np.expm1(log_target)
     
-    def create_sequences(self, voyage_df: pd.DataFrame) -> tuple:
-        """从航程数据创建序列"""
+    def create_sequences(self, voyage_df: pd.DataFrame, max_sequences: int = 500000) -> tuple:
+        """从航程数据创建序列（内存优化版 + 分层采样）
+        
+        优化策略：
+        1. 先统计总序列数，预分配数组
+        2. 使用float32减少内存
+        3. 分层采样：确保高remaining_hours样本被充分采样
+        """
         feature_cols = ['lat', 'lon', 'sog', 'cog']
+        group_col = 'voyage_id' if 'voyage_id' in voyage_df.columns else 'mmsi'
         
-        all_X = []
-        all_X_mark = []
-        all_y = []
-        all_sailing_days = []
+        # 第一遍：统计每个航程可产生的序列数
+        print("  统计序列数量...")
+        voyage_seq_counts = []
+        voyage_ids = []
+        voyage_max_remaining = []  # 记录每个航程的最大remaining_hours
         
-        for mmsi, group in voyage_df.groupby('mmsi'):
-            group = group.sort_values('postime')
+        for vid, group in voyage_df.groupby(group_col):
+            n_seq = max(0, len(group) - self.seq_len - self.pred_len + 1)
+            if n_seq > 0:
+                voyage_seq_counts.append(n_seq)
+                voyage_ids.append(vid)
+                voyage_max_remaining.append(group['remaining_hours'].max())
+        
+        total_possible = sum(voyage_seq_counts)
+        print(f"  可生成序列: {total_possible:,}, 目标: {max_sequences:,}")
+        
+        # 分层采样：按航程时长分类，确保各类别都有足够样本
+        voyage_max_remaining = np.array(voyage_max_remaining)
+        
+        # 定义时长分层
+        strata_bins = [0, 100, 200, 400, 720]
+        strata_labels = ['<100h', '100-200h', '200-400h', '>400h']
+        strata_weights = [1.0, 1.5, 2.0, 3.0]  # 长航程权重更高
+        
+        # 计算每个航程的采样权重
+        voyage_strata = np.digitize(voyage_max_remaining, strata_bins[1:])
+        voyage_weights = np.array([strata_weights[min(s, len(strata_weights)-1)] for s in voyage_strata])
+        
+        # 基于权重计算采样数量
+        if total_possible > max_sequences:
+            base_ratio = max_sequences / total_possible
+            samples_per_voyage = []
+            for i, c in enumerate(voyage_seq_counts):
+                # 权重调整的采样数
+                weighted_sample = int(c * base_ratio * voyage_weights[i])
+                samples_per_voyage.append(max(1, min(c, weighted_sample)))
+            actual_total = sum(samples_per_voyage)
             
-            features = group[feature_cols].values
-            targets = group['remaining_hours'].values
+            # 如果超出目标，按比例缩减
+            if actual_total > max_sequences * 1.2:
+                scale = max_sequences / actual_total
+                samples_per_voyage = [max(1, int(s * scale)) for s in samples_per_voyage]
+                actual_total = sum(samples_per_voyage)
+        else:
+            samples_per_voyage = voyage_seq_counts
+            actual_total = total_possible
+        
+        # 打印分层统计
+        for i, label in enumerate(strata_labels):
+            mask = (voyage_strata == i)
+            n_voyages = mask.sum()
+            n_samples = sum(samples_per_voyage[j] for j in range(len(voyage_ids)) if mask[j])
+            print(f"  {label}: {n_voyages} 航程, {n_samples:,} 样本")
+        
+        print(f"  实际采样: {actual_total:,} 序列")
+        
+        # 预分配数组（float32节省内存）
+        X = np.zeros((actual_total, self.seq_len, 4), dtype=np.float32)
+        X_mark_enc = np.zeros((actual_total, self.seq_len, 5), dtype=np.float32)
+        X_mark_dec = np.zeros((actual_total, self.label_len + self.pred_len, 5), dtype=np.float32)
+        y = np.zeros(actual_total, dtype=np.float32)
+        sailing_days = np.zeros(actual_total, dtype=np.float32)
+        
+        # 第二遍：填充数据
+        print("  生成序列...")
+        idx = 0
+        for i, (vid, group) in enumerate(voyage_df.groupby(group_col)):
+            if vid not in voyage_ids:
+                continue
+            
+            vid_idx = voyage_ids.index(vid)
+            n_to_sample = samples_per_voyage[vid_idx]
+            
+            group = group.sort_values('postime')
+            features = group[feature_cols].values.astype(np.float32)
+            targets = group['remaining_hours'].values.astype(np.float32)
             postime = pd.to_datetime(group['postime'])
             
             first_time = postime.iloc[0]
-            sailing_days = (postime - first_time).dt.total_seconds() / 86400
+            sd_values = ((postime - first_time).dt.total_seconds() / 86400).values.astype(np.float32)
             
-            # 时间特征（5维）
+            # 时间特征
             time_marks = np.stack([
                 postime.dt.month.values / 12,
                 postime.dt.day.values / 31,
                 postime.dt.weekday.values / 7,
                 postime.dt.hour.values / 24,
                 postime.dt.minute.values / 60
-            ], axis=1)
+            ], axis=1).astype(np.float32)
             
-            # 滑动窗口
-            for i in range(len(features) - self.seq_len - self.pred_len + 1):
-                X = features[i:i+self.seq_len]
-                X_mark_enc = time_marks[i:i+self.seq_len]
-                X_mark_dec = time_marks[i+self.seq_len-self.label_len:i+self.seq_len+self.pred_len]
-                y = targets[i+self.seq_len]
-                sd = sailing_days.iloc[i+self.seq_len]
-                
-                all_X.append(X)
-                all_X_mark.append((X_mark_enc, X_mark_dec))
-                all_y.append(y)
-                all_sailing_days.append(sd)
+            # 可用的起始位置
+            max_start = len(features) - self.seq_len - self.pred_len + 1
+            if max_start <= 0:
+                continue
+            
+            # 均匀采样起始位置
+            if n_to_sample >= max_start:
+                starts = list(range(max_start))
+            else:
+                starts = np.linspace(0, max_start - 1, n_to_sample, dtype=int).tolist()
+            
+            for start in starts:
+                if idx >= actual_total:
+                    break
+                X[idx] = features[start:start+self.seq_len]
+                X_mark_enc[idx] = time_marks[start:start+self.seq_len]
+                X_mark_dec[idx] = time_marks[start+self.seq_len-self.label_len:start+self.seq_len+self.pred_len]
+                y[idx] = targets[start+self.seq_len]
+                sailing_days[idx] = sd_values[start+self.seq_len]
+                idx += 1
+            
+            if idx >= actual_total:
+                break
         
-        X = np.array(all_X)
-        X_mark_enc = np.array([m[0] for m in all_X_mark])
-        X_mark_dec = np.array([m[1] for m in all_X_mark])
-        y = np.array(all_y)
-        sailing_days = np.array(all_sailing_days)
+        # 截断到实际使用的大小
+        X = X[:idx]
+        X_mark_enc = X_mark_enc[:idx]
+        X_mark_dec = X_mark_dec[:idx]
+        y = y[:idx]
+        sailing_days = sailing_days[:idx]
+        
+        print(f"  最终序列数: {idx:,}")
         
         # 归一化
         X_flat = X.reshape(-1, X.shape[-1])
-        X_norm = self.normalize_features(X_flat, fit=True).reshape(X.shape)
-        y_norm = self.normalize_target(y, fit=True)
+        X_norm = self.normalize_features(X_flat, fit=True).reshape(X.shape).astype(np.float32)
+        y_norm = self.normalize_target(y, fit=True).astype(np.float32)
         
         return X_norm, X_mark_enc, X_mark_dec, y_norm, sailing_days
     
@@ -503,16 +590,21 @@ def plot_results(y_pred, y_true, sailing_days, save_dir):
     ax.set_title('MAE by Sailing Days')
     ax.grid(True, alpha=0.3)
     
-    # 3. 预测vs实际
+    # 3. 预测vs实际 - 使用2D直方图展示密度
     ax = axes[1, 0]
-    ax.scatter(y_true, y_pred, alpha=0.3, s=10)
     max_val = max(y_true.max(), y_pred.max())
-    ax.plot([0, max_val], [0, max_val], 'r--', label='Perfect')
+    
+    # 使用hexbin展示点密度
+    hb = ax.hexbin(y_true, y_pred, gridsize=50, cmap='Blues', mincnt=1, 
+                   extent=[0, max_val, 0, max_val])
+    ax.plot([0, max_val], [0, max_val], 'r--', linewidth=2, label='Perfect')
     ax.set_xlabel('Actual Hours')
     ax.set_ylabel('Predicted Hours')
-    ax.set_title('Predicted vs Actual')
+    ax.set_title('Predicted vs Actual (density)')
     ax.legend()
-    ax.grid(True, alpha=0.3)
+    ax.set_xlim(0, max_val)
+    ax.set_ylim(0, max_val)
+    plt.colorbar(hb, ax=ax, label='Count')
     
     # 4. 误差分布
     ax = axes[1, 1]
@@ -567,6 +659,9 @@ def main():
     # 其他
     parser.add_argument('--use_cache', action='store_true', help='使用缓存的预处理数据')
     parser.add_argument('--max_files', type=int, default=None, help='处理文件数限制')
+    parser.add_argument('--max_voyages', type=int, default=5000, help='最多使用的航程数（控制内存）')
+    parser.add_argument('--max_sequences', type=int, default=500000, help='最多生成的训练序列数')
+    parser.add_argument('--eval_only', action='store_true', help='仅评估和重绘图（跳过训练）')
     
     args = parser.parse_args()
     
@@ -588,10 +683,12 @@ def main():
         print("预处理数据不存在，请先运行: python preprocess_data.py")
         return
     
-    voyage_df = pd.read_csv(voyage_path)
+    # 只统计行数，不加载整个文件
+    print("统计数据量...")
+    voyage_count = sum(1 for _ in open(voyage_path)) - 1  # 减去header
     stop_df = pd.read_csv(stop_path) if os.path.exists(stop_path) else pd.DataFrame()
     
-    print(f"航程数据: {len(voyage_df):,} 条")
+    print(f"航程数据: {voyage_count:,} 条")
     print(f"停靠数据: {len(stop_df):,} 条")
     
     # ===== Step 2: 训练港口停靠模型（可选）=====
@@ -612,12 +709,87 @@ def main():
     print("Step 3: 准备训练数据")
     print("="*60)
     
-    # 过滤数据
-    training_df = voyage_df[['lat', 'lon', 'sog', 'cog', 'remaining_hours', 'mmsi', 'postime']].copy()
-    training_df = training_df.dropna()
-    training_df = training_df[(training_df['remaining_hours'] >= 0) & (training_df['remaining_hours'] <= 720)]
-    training_df = training_df[(training_df['sog'] >= 0) & (training_df['sog'] <= 30)]
+    # 采样参数 - 97M数据太大，采样部分航程训练
+    max_voyages = args.max_voyages  # 使用命令行参数
     
+    # 分块读取CSV，只加载需要的列，使用float32
+    print("分块读取航程数据...")
+    use_cols = ['lat', 'lon', 'sog', 'cog', 'remaining_hours', 'mmsi', 'postime', 'voyage_id', 'voyage_duration_hours']
+    dtype = {'lat': 'float32', 'lon': 'float32', 'sog': 'float32', 'cog': 'float32', 
+             'remaining_hours': 'float32', 'voyage_duration_hours': 'float32'}
+    
+    chunks = []
+    voyage_ids_seen = set()
+    total_rows = 0
+    
+    for chunk in pd.read_csv(voyage_path, usecols=use_cols, dtype=dtype, chunksize=500000):
+        # 数据过滤
+        chunk = chunk.dropna()
+        chunk = chunk[(chunk['remaining_hours'] >= 0) & (chunk['remaining_hours'] <= 720)]
+        chunk = chunk[(chunk['sog'] >= 0) & (chunk['sog'] <= 30)]
+        
+        # 过滤超长航程（只保留航程时长 <= 30天 = 720小时的航程）
+        if 'voyage_duration_hours' in chunk.columns:
+            valid_voyages = chunk.groupby('voyage_id')['voyage_duration_hours'].first()
+            valid_voyages = valid_voyages[valid_voyages <= 720].index
+            chunk = chunk[chunk['voyage_id'].isin(valid_voyages)]
+        
+        # 过滤时间跨度异常的航程（实际时间跨度不应超过标记时长的1.5倍）
+        chunk['postime_dt'] = pd.to_datetime(chunk['postime'])
+        voyage_time_check = chunk.groupby('voyage_id').agg({
+            'postime_dt': ['min', 'max'],
+            'voyage_duration_hours': 'first'
+        })
+        voyage_time_check.columns = ['t_min', 't_max', 'dur']
+        voyage_time_check['actual_span'] = (voyage_time_check['t_max'] - voyage_time_check['t_min']).dt.total_seconds() / 3600
+        voyage_time_check['ratio'] = voyage_time_check['actual_span'] / voyage_time_check['dur'].clip(lower=1)
+        valid_time_voyages = voyage_time_check[voyage_time_check['ratio'] <= 1.5].index
+        chunk = chunk[chunk['voyage_id'].isin(valid_time_voyages)]
+        chunk = chunk.drop(columns=['postime_dt'])
+        
+        # 检查新航程
+        new_voyage_ids = set(chunk['voyage_id'].unique()) - voyage_ids_seen
+        
+        if len(voyage_ids_seen) >= max_voyages:
+            # 只保留已见过的航程数据
+            chunk = chunk[chunk['voyage_id'].isin(voyage_ids_seen)]
+        else:
+            # 添加新航程直到达到上限
+            remaining = max_voyages - len(voyage_ids_seen)
+            new_to_add = list(new_voyage_ids)[:remaining]
+            voyage_ids_seen.update(new_to_add)
+            chunk = chunk[chunk['voyage_id'].isin(voyage_ids_seen)]
+        
+        if len(chunk) > 0:
+            chunks.append(chunk)
+            total_rows += len(chunk)
+        
+        if len(voyage_ids_seen) >= max_voyages and total_rows > 5000000:
+            break  # 足够数据了
+    
+    training_df = pd.concat(chunks, ignore_index=True)
+    del chunks
+    import gc
+    gc.collect()
+    
+    # 全局过滤：移除时间跨度异常的航程（跨多个chunk的情况）
+    print("过滤时间跨度异常的航程...")
+    training_df['postime_dt'] = pd.to_datetime(training_df['postime'])
+    voyage_time_check = training_df.groupby('voyage_id').agg({
+        'postime_dt': ['min', 'max'],
+        'voyage_duration_hours': 'first'
+    })
+    voyage_time_check.columns = ['t_min', 't_max', 'dur']
+    voyage_time_check['actual_span'] = (voyage_time_check['t_max'] - voyage_time_check['t_min']).dt.total_seconds() / 3600
+    voyage_time_check['ratio'] = voyage_time_check['actual_span'] / voyage_time_check['dur'].clip(lower=1)
+    
+    bad_voyages = voyage_time_check[voyage_time_check['ratio'] > 1.5].index
+    print(f"  移除 {len(bad_voyages)} 个时间跨度异常的航程")
+    training_df = training_df[~training_df['voyage_id'].isin(bad_voyages)]
+    training_df = training_df.drop(columns=['postime_dt'])
+    gc.collect()
+    
+    print(f"采样航程数: {training_df['voyage_id'].nunique():,}")
     print(f"过滤后数据: {len(training_df):,} 条")
     
     if len(training_df) < 1000:
@@ -625,7 +797,11 @@ def main():
         return
     
     dataset = VoyageETADataset(seq_len=args.seq_len, label_len=args.label_len, pred_len=args.pred_len)
-    X, X_mark_enc, X_mark_dec, y, sailing_days = dataset.create_sequences(training_df)
+    X, X_mark_enc, X_mark_dec, y, sailing_days = dataset.create_sequences(training_df, max_sequences=args.max_sequences)
+    
+    # 释放原始数据内存
+    del training_df
+    gc.collect()
     
     print(f"序列数量: {len(X):,}")
     print(f"序列形状: X={X.shape}, y={y.shape}")
@@ -659,21 +835,32 @@ def main():
     
     trainer = InformerTrainer(model, device, lr=args.lr)
     
-    best_val_loss = float('inf')
-    for epoch in range(args.epochs):
-        train_loss = trainer.train_epoch(train_loader)
-        val_loss = trainer.validate(val_loader)
-        trainer.scheduler.step(val_loss)
+    # 如果是eval_only模式，直接加载模型跳过训练
+    if args.eval_only:
+        model_path = os.path.join(args.output_dir, 'best_informer.pth')
+        if os.path.exists(model_path):
+            print(f"加载已有模型: {model_path}")
+            trainer.load(model_path)
+        else:
+            print(f"错误: 模型文件不存在 {model_path}")
+            return
+    else:
+        best_val_loss = float('inf')
+        for epoch in range(args.epochs):
+            train_loss = trainer.train_epoch(train_loader)
+            val_loss = trainer.validate(val_loader)
+            trainer.scheduler.step(val_loss)
+            
+            lr = trainer.optimizer.param_groups[0]['lr']
+            print(f"Epoch {epoch+1}/{args.epochs}: Train={train_loss:.4f}, Val={val_loss:.4f}, LR={lr:.2e}")
+            
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                trainer.save(os.path.join(args.output_dir, 'best_informer.pth'))
+                print("  -> 保存最佳模型!")
         
-        lr = trainer.optimizer.param_groups[0]['lr']
-        print(f"Epoch {epoch+1}/{args.epochs}: Train={train_loss:.4f}, Val={val_loss:.4f}, LR={lr:.2e}")
-        
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            trainer.save(os.path.join(args.output_dir, 'best_informer.pth'))
-            print("  -> 保存最佳模型!")
-    
-    trainer.load(os.path.join(args.output_dir, 'best_informer.pth'))
+        # 训练后加载最佳模型
+        trainer.load(os.path.join(args.output_dir, 'best_informer.pth'))
     
     # ===== Step 5: 评估 =====
     print("\n" + "="*60)
@@ -682,17 +869,71 @@ def main():
     
     y_pred_norm, y_true_norm, pred_sd = trainer.predict(test_loader)
     
-    y_pred = dataset.inverse_normalize_target(y_pred_norm)
+    y_pred_sailing = dataset.inverse_normalize_target(y_pred_norm)
     y_true = dataset.inverse_normalize_target(y_true_norm)
-    y_pred = np.maximum(y_pred, 0)
+    y_pred_sailing = np.maximum(y_pred_sailing, 0)
     
-    print(f"预测范围: [{y_pred.min():.2f}, {y_pred.max():.2f}] 小时")
-    print(f"实际范围: [{y_true.min():.2f}, {y_true.max():.2f}] 小时")
+    print(f"【Informer 航行时间预测】")
+    print(f"  预测范围: [{y_pred_sailing.min():.2f}, {y_pred_sailing.max():.2f}] 小时")
+    print(f"  实际范围: [{y_true.min():.2f}, {y_true.max():.2f}] 小时")
     
-    metrics = calculate_metrics(y_pred, y_true)
-    print("\n【航程预测指标】")
-    for name, value in metrics.items():
+    # 单模型指标
+    metrics_sailing = calculate_metrics(y_pred_sailing, y_true)
+    print("\n【单模型指标（仅航行时间）】")
+    for name, value in metrics_sailing.items():
         print(f"  {name}: {value:.4f}")
+    
+    # ===== 双模型评估 =====
+    # 加载港口停靠模型并预测停靠时间
+    port_model_dir = os.path.join(args.output_dir, 'port_model')
+    port_model_exists = os.path.exists(os.path.join(port_model_dir, 'model.pth'))
+    
+    if port_model_exists and os.path.exists(stop_path):
+        print("\n【双模型评估】")
+        print("加载港口停靠时间模型...")
+        
+        port_model = PortStopModel(port_model_dir)
+        port_model.load()
+        
+        # 读取停靠数据，计算各区域平均停靠时间
+        stop_df = pd.read_csv(stop_path)
+        region_avg_stop = stop_df.groupby('region')['duration_hours'].mean().to_dict()
+        overall_avg_stop = stop_df['duration_hours'].mean()
+        
+        print(f"  各区域平均停靠时间:")
+        for region, avg in region_avg_stop.items():
+            print(f"    {region}: {avg:.1f}h")
+        
+        # 计算预测的停靠时间
+        # 简化假设：每个航程结束后有一次停靠，停靠地点用目的地（美国西海岸）作为默认
+        # 实际场景中，船舶知道会途径哪些港口
+        default_region = '美国西海岸'  # 数据集主要是中国-美西航线
+        avg_stop_hours = region_avg_stop.get(default_region, overall_avg_stop)
+        
+        # 对于每个预测，根据剩余航行时间估计还有多少次停靠
+        # 简化：假设每次跨洋航行（>100小时）后有1次停靠
+        num_stops = np.where(y_pred_sailing > 100, 1, 0)
+        y_pred_stop = num_stops * avg_stop_hours
+        
+        # 最终ETA = 航行时间 + 停靠时间
+        y_pred_total = y_pred_sailing + y_pred_stop
+        
+        print(f"\n  预测停靠时间: 平均 {y_pred_stop.mean():.1f}h")
+        print(f"  最终ETA范围: [{y_pred_total.min():.2f}, {y_pred_total.max():.2f}] 小时")
+        
+        metrics_total = calculate_metrics(y_pred_total, y_true)
+        print("\n【双模型指标（航行+停靠）】")
+        for name, value in metrics_total.items():
+            print(f"  {name}: {value:.4f}")
+        
+        # 使用双模型结果绘图
+        y_pred = y_pred_total
+        metrics = metrics_total
+    else:
+        print("\n港口模型不存在，跳过双模型评估")
+        print("可使用 --train_port_model 训练港口模型")
+        y_pred = y_pred_sailing
+        metrics = metrics_sailing
     
     # 保存结果
     with open(os.path.join(args.output_dir, 'metrics.txt'), 'w') as f:

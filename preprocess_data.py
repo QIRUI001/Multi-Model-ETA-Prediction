@@ -1,49 +1,51 @@
 #!/usr/bin/env python
 """
-数据预处理脚本
+并行化数据预处理脚本（内存优化版）
 
 功能：
-1. 从原始AIS数据中提取最长航段（跨太平洋航段）
-2. 去除港口等泊时间，只保留纯航行数据
-3. 提取港口停靠信息用于训练停靠时间模型
+1. 分块读取CSV，避免内存溢出
+2. 按MMSI分组提取所有船舶的航程
+3. 使用有限并行数控制内存
+4. 流式合并结果
 
 用法：
-    python preprocess_data.py --data_dir ./data --output_dir ./output/processed --max_files 5
+    python preprocess_data_parallel.py --data_dir ./data --output_dir ./output/processed
+    python preprocess_data_parallel.py --workers 4  # 减少并行数以降低内存
+    python preprocess_data_parallel.py --chunk_size 500000  # 调整分块大小
 """
 
 import os
-import sys
 import argparse
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from tqdm import tqdm
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Generator
 from dataclasses import dataclass
 import warnings
+from multiprocessing import Pool, cpu_count
+from functools import partial
+import gc
+import shutil
+
 warnings.filterwarnings('ignore')
 
 
 @dataclass
 class VoyageSegment:
     """航段信息"""
+    mmsi: int
     segment_id: int
     start_time: pd.Timestamp
     end_time: pd.Timestamp
     duration_hours: float
-    start_lon: float
-    end_lon: float
-    start_lat: float
-    end_lat: float
     num_points: int
     avg_sog: float
-    data: pd.DataFrame
 
 
 @dataclass
 class PortStop:
     """港口停靠信息"""
-    port_id: int
+    mmsi: int
     arrival_time: pd.Timestamp
     departure_time: pd.Timestamp
     duration_hours: float
@@ -52,382 +54,402 @@ class PortStop:
     region: str
 
 
-class VoyageExtractor:
-    """从AIS数据中提取航程信息"""
+# ============================================================
+# 核心处理函数
+# ============================================================
+
+REQUIRED_COLS = ['mmsi', 'postime', 'eta', 'lon', 'lat', 'sog', 'cog']
+
+# 停靠速度阈值（节）
+STOP_SPEED_THRESHOLD = 0.3
+# 最小航段时长（小时）
+MIN_SEGMENT_HOURS = 6
+# 最小停靠时长（小时）
+MIN_STOP_HOURS = 2
+# 最小数据密度（点/天）
+MIN_POINTS_PER_DAY = 10
+# 最小数据点数
+MIN_POINTS = 50
+
+
+def classify_region(lon: float, lat: float) -> str:
+    """根据经纬度判断区域"""
+    if 100 <= lon <= 135 and 20 <= lat <= 45:
+        return '中国东部'
+    if 103 <= lon <= 105 and 0 <= lat <= 3:
+        return '新加坡'
+    if 55 <= lon <= 80 and 10 <= lat <= 30:
+        return '中东/印度'
+    if 30 <= lon <= 55 and 25 <= lat <= 35:
+        return '红海/苏伊士'
+    if -130 <= lon <= -115 and 30 <= lat <= 50:
+        return '美国西海岸'
+    return '其他'
+
+
+def process_single_ship(ship_df: pd.DataFrame, mmsi: int) -> Tuple[List[pd.DataFrame], List[dict]]:
+    """处理单艘船的数据，提取所有有效航段"""
     
-    # 速度阈值：低于此值视为停靠（节）- 降低阈值更严格判定停靠
-    STOP_SPEED_THRESHOLD = 0.3
+    if len(ship_df) < MIN_POINTS:
+        return [], []
     
-    # 最小航段时长（小时）
-    MIN_SEGMENT_HOURS = 6
+    ship_df = ship_df.sort_values('postime').copy()
+    ship_df['postime'] = pd.to_datetime(ship_df['postime'])
     
-    # 最小停靠时长（小时）- 增加到2小时避免误判
-    MIN_STOP_HOURS = 2
+    # 检查整体数据密度
+    time_span = (ship_df['postime'].max() - ship_df['postime'].min()).total_seconds() / 86400
+    if time_span > 0 and len(ship_df) / time_span < MIN_POINTS_PER_DAY:
+        return [], []
     
-    # 最小数据密度（点/天）
-    MIN_POINTS_PER_DAY = 10
+    # 标记停靠状态
+    ship_df['is_stopped'] = ship_df['sog'] < STOP_SPEED_THRESHOLD
     
-    def __init__(self, 
-                 stop_speed_threshold: float = 0.3,
-                 min_segment_hours: float = 6,
-                 min_stop_hours: float = 2,
-                 min_points_per_day: float = 10):
-        self.stop_speed_threshold = stop_speed_threshold
-        self.min_segment_hours = min_segment_hours
-        self.min_stop_hours = min_stop_hours
-        self.min_points_per_day = min_points_per_day
+    # 分割连续的航行/停靠段
+    ship_df['segment_change'] = ship_df['is_stopped'].ne(ship_df['is_stopped'].shift()).cumsum()
     
-    def classify_region(self, lon: float, lat: float) -> str:
-        """根据经纬度判断区域"""
-        # 中国东部
-        if 100 <= lon <= 135 and 20 <= lat <= 45:
-            return '中国东部'
-        # 新加坡
-        if 103 <= lon <= 105 and 0 <= lat <= 3:
-            return '新加坡'
-        # 中东/印度
-        if 55 <= lon <= 80 and 10 <= lat <= 30:
-            return '中东/印度'
-        # 红海/苏伊士
-        if 30 <= lon <= 55 and 25 <= lat <= 35:
-            return '红海/苏伊士'
-        # 美国西海岸
-        if -130 <= lon <= -115 and 30 <= lat <= 50:
-            return '美国西海岸'
-        return '其他'
+    voyage_dfs = []
+    stops = []
+    segment_idx = 0
     
-    def extract_segments(self, df: pd.DataFrame) -> Tuple[List[VoyageSegment], List[PortStop]]:
-        """从船舶数据中提取航段和停靠信息"""
-        if len(df) < 10:
-            return [], []
+    for seg_id, group in ship_df.groupby('segment_change'):
+        is_sailing = not group['is_stopped'].iloc[0]
+        start_time = group['postime'].iloc[0]
+        end_time = group['postime'].iloc[-1]
+        duration_hours = (end_time - start_time).total_seconds() / 3600
         
-        df = df.sort_values('postime').copy()
-        df['postime'] = pd.to_datetime(df['postime'])
-        
-        # 检查数据密度
-        time_span_days = (df['postime'].max() - df['postime'].min()).total_seconds() / 86400
-        if time_span_days > 0:
-            points_per_day = len(df) / time_span_days
-            if points_per_day < self.min_points_per_day:
-                # 数据太稀疏，跳过
-                return [], []
-        
-        # 标记停靠状态
-        df['is_stopped'] = df['sog'] < self.stop_speed_threshold
-        
-        # 分割连续的航行/停靠段
-        df['segment_change'] = df['is_stopped'].ne(df['is_stopped'].shift()).cumsum()
-        
-        voyage_segments = []
-        port_stops = []
-        
-        for segment_id, group in df.groupby('segment_change'):
-            is_sailing = not group['is_stopped'].iloc[0]
-            
-            start_time = group['postime'].iloc[0]
-            end_time = group['postime'].iloc[-1]
-            duration_hours = (end_time - start_time).total_seconds() / 3600
-            
-            if is_sailing and duration_hours >= self.min_segment_hours:
-                # 航行段
-                segment = VoyageSegment(
-                    segment_id=segment_id,
-                    start_time=start_time,
-                    end_time=end_time,
-                    duration_hours=duration_hours,
-                    start_lon=group['lon'].iloc[0],
-                    end_lon=group['lon'].iloc[-1],
-                    start_lat=group['lat'].iloc[0],
-                    end_lat=group['lat'].iloc[-1],
-                    num_points=len(group),
-                    avg_sog=group['sog'].mean(),
-                    data=group.drop(columns=['is_stopped', 'segment_change'])
-                )
-                voyage_segments.append(segment)
+        if is_sailing and duration_hours >= MIN_SEGMENT_HOURS and len(group) >= MIN_POINTS:
+            # 检查数据密度
+            duration_days = duration_hours / 24
+            if duration_days > 0 and len(group) / duration_days >= MIN_POINTS_PER_DAY:
+                # 有效航段
+                seg_df = group.drop(columns=['is_stopped', 'segment_change']).copy()
+                seg_df['mmsi'] = mmsi
+                seg_df['voyage_id'] = f"{mmsi}_{segment_idx}"
+                seg_df['voyage_duration_hours'] = duration_hours
+                seg_df['remaining_hours'] = (end_time - seg_df['postime']).dt.total_seconds() / 3600
                 
-            elif not is_sailing and duration_hours >= self.min_stop_hours:
-                # 港口停靠
-                mean_lon = group['lon'].mean()
-                mean_lat = group['lat'].mean()
-                stop = PortStop(
-                    port_id=segment_id,
-                    arrival_time=start_time,
-                    departure_time=end_time,
-                    duration_hours=duration_hours,
-                    lon=mean_lon,
-                    lat=mean_lat,
-                    region=self.classify_region(mean_lon, mean_lat)
-                )
-                port_stops.append(stop)
+                voyage_dfs.append(seg_df)
+                segment_idx += 1
         
-        return voyage_segments, port_stops
-    
-    def find_longest_segment(self, segments: List[VoyageSegment]) -> Optional[VoyageSegment]:
-        """找出最长的航段"""
-        if not segments:
-            return None
-        return max(segments, key=lambda s: s.duration_hours)
-    
-    def find_transpacific_segment(self, segments: List[VoyageSegment]) -> Optional[VoyageSegment]:
-        """找出跨太平洋航段"""
-        for segment in sorted(segments, key=lambda s: s.duration_hours, reverse=True):
-            # 检查是否跨太平洋
-            start_in_asia = segment.start_lon > 100 or segment.start_lon < -150
-            end_in_us_west = -130 < segment.end_lon < -115
-            
-            start_in_us_west = -130 < segment.start_lon < -115
-            end_in_asia = segment.end_lon > 100 or segment.end_lon < -150
-            
-            if (start_in_asia and end_in_us_west) or (start_in_us_west and end_in_asia):
-                return segment
-        
-        # 如果没找到明确的跨太平洋航段，返回最长航段
-        return self.find_longest_segment(segments)
-
-
-class DataProcessor:
-    """批量处理数据"""
-    
-    # 只读取需要的列
-    REQUIRED_COLS = ['mmsi', 'postime', 'eta', 'lon', 'lat', 'sog', 'cog']
-    
-    def __init__(self, data_dir: str, output_dir: str):
-        self.data_dir = Path(data_dir)
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.extractor = VoyageExtractor()
-    
-    def get_ais_files(self) -> List[Path]:
-        """获取所有AIS数据文件"""
-        files = []
-        for f in self.data_dir.glob('*-ais.csv'):
-            # 排除Mac系统文件
-            if not f.name.startswith('._'):
-                files.append(f)
-        return sorted(files)
-    
-    def process_single_file(self, csv_file: Path) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
-        """处理单个CSV文件"""
-        try:
-            # 只读取需要的列
-            df = pd.read_csv(csv_file, usecols=self.REQUIRED_COLS, low_memory=False)
-        except ValueError:
-            # 如果某些列不存在，读取全部再筛选
-            df = pd.read_csv(csv_file, low_memory=False)
-            available_cols = [c for c in self.REQUIRED_COLS if c in df.columns]
-            df = df[available_cols]
-        
-        # 获取MMSI
-        mmsi = df['mmsi'].iloc[0] if 'mmsi' in df.columns else csv_file.stem
-        
-        # 提取航段和停靠
-        segments, stops = self.extractor.extract_segments(df)
-        
-        if not segments:
-            return None, None
-        
-        # 找到最长航段（跨太平洋）
-        main_segment = self.extractor.find_transpacific_segment(segments)
-        
-        if main_segment is None:
-            return None, None
-        
-        # 准备航段数据
-        voyage_df = main_segment.data.copy()
-        voyage_df['mmsi'] = mmsi
-        voyage_df['voyage_duration_hours'] = main_segment.duration_hours
-        voyage_df['file_source'] = csv_file.name
-        
-        # 计算剩余航行时间
-        voyage_df['postime'] = pd.to_datetime(voyage_df['postime'])
-        voyage_df['remaining_hours'] = (main_segment.end_time - voyage_df['postime']).dt.total_seconds() / 3600
-        
-        # 准备停靠数据
-        stop_records = []
-        for stop in stops:
-            stop_records.append({
+        elif not is_sailing and duration_hours >= MIN_STOP_HOURS:
+            # 港口停靠
+            mean_lon = group['lon'].mean()
+            mean_lat = group['lat'].mean()
+            stops.append({
                 'mmsi': mmsi,
-                'port_id': stop.port_id,
-                'arrival_time': stop.arrival_time,
-                'departure_time': stop.departure_time,
-                'duration_hours': stop.duration_hours,
-                'lon': stop.lon,
-                'lat': stop.lat,
-                'region': stop.region,
-                'file_source': csv_file.name
+                'arrival_time': start_time,
+                'departure_time': end_time,
+                'duration_hours': duration_hours,
+                'lon': mean_lon,
+                'lat': mean_lat,
+                'region': classify_region(mean_lon, mean_lat)
             })
-        stop_df = pd.DataFrame(stop_records) if stop_records else None
-        
-        return voyage_df, stop_df
     
-    def process_all(self, max_files: Optional[int] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """处理所有文件"""
-        csv_files = self.get_ais_files()
-        if max_files:
-            csv_files = csv_files[:max_files]
+    return voyage_dfs, stops
+
+
+def process_single_file(args) -> Tuple[str, int, int, int]:
+    """处理单个CSV文件（分块读取，低内存）"""
+    csv_file, output_dir, chunk_size = args
+    
+    file_stem = Path(csv_file).stem
+    temp_dir = Path(output_dir) / 'temp'
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 统计变量
+    n_ships = 0
+    n_voyages = 0
+    n_points = 0
+    processed_mmsis = set()  # 记录已处理的MMSI
+    
+    try:
+        # 分块读取并按MMSI聚合
+        mmsi_data = {}  # mmsi -> list of chunks
         
-        print(f"Found {len(csv_files)} AIS files to process")
+        for chunk in pd.read_csv(csv_file, usecols=REQUIRED_COLS, 
+                                  low_memory=False, chunksize=chunk_size):
+            for mmsi, group in chunk.groupby('mmsi'):
+                if mmsi in processed_mmsis:
+                    continue  # 已处理过
+                if mmsi not in mmsi_data:
+                    mmsi_data[mmsi] = []
+                mmsi_data[mmsi].append(group)
+            
+            # 检查内存，如果某个MMSI数据量够大就先处理
+            for mmsi in list(mmsi_data.keys()):
+                total_rows = sum(len(df) for df in mmsi_data[mmsi])
+                if total_rows >= MIN_POINTS * 2:  # 有足够数据
+                    # 合并并处理这艘船
+                    ship_df = pd.concat(mmsi_data[mmsi], ignore_index=True)
+                    del mmsi_data[mmsi]
+                    processed_mmsis.add(mmsi)
+                    
+                    voyage_dfs, stops = process_single_ship(ship_df, mmsi)
+                    
+                    # 统计并写入临时文件
+                    if voyage_dfs:
+                        n_ships += 1
+                        n_voyages += len(voyage_dfs)
+                        for i, vdf in enumerate(voyage_dfs):
+                            n_points += len(vdf)
+                            vpath = temp_dir / f'{file_stem}_{mmsi}_{i}_voyage.parquet'
+                            vdf.to_parquet(vpath, index=False)
+                    
+                    if stops:
+                        spath = temp_dir / f'{file_stem}_{mmsi}_stops.parquet'
+                        pd.DataFrame(stops).to_parquet(spath, index=False)
+                    
+                    del ship_df, voyage_dfs, stops
+                    gc.collect()
         
-        all_voyage_data = []
-        all_stop_data = []
-        
-        for csv_file in tqdm(csv_files, desc='Processing files'):
-            try:
-                voyage_df, stop_df = self.process_single_file(csv_file)
-                if voyage_df is not None and len(voyage_df) > 0:
-                    all_voyage_data.append(voyage_df)
-                if stop_df is not None and len(stop_df) > 0:
-                    all_stop_data.append(stop_df)
-            except Exception as e:
-                print(f"\nError processing {csv_file.name}: {e}")
+        # 处理剩余的船舶数据
+        for mmsi, chunks in mmsi_data.items():
+            if not chunks:
                 continue
+            ship_df = pd.concat(chunks, ignore_index=True)
+            voyage_dfs, stops = process_single_ship(ship_df, mmsi)
+            
+            if voyage_dfs:
+                n_ships += 1
+                n_voyages += len(voyage_dfs)
+                for i, vdf in enumerate(voyage_dfs):
+                    n_points += len(vdf)
+                    vpath = temp_dir / f'{file_stem}_{mmsi}_{i}_voyage.parquet'
+                    vdf.to_parquet(vpath, index=False)
+            
+            if stops:
+                spath = temp_dir / f'{file_stem}_{mmsi}_stops.parquet'
+                pd.DataFrame(stops).to_parquet(spath, index=False)
+            
+            del ship_df, voyage_dfs, stops
         
-        voyage_combined = pd.concat(all_voyage_data, ignore_index=True) if all_voyage_data else pd.DataFrame()
-        stop_combined = pd.concat(all_stop_data, ignore_index=True) if all_stop_data else pd.DataFrame()
+        del mmsi_data
+        gc.collect()
         
-        return voyage_combined, stop_combined
+        return (file_stem, n_ships, n_voyages, n_points)
     
-    def save(self, voyage_df: pd.DataFrame, stop_df: pd.DataFrame):
-        """保存处理后的数据"""
-        if len(voyage_df) > 0:
-            voyage_path = self.output_dir / 'processed_voyages.csv'
-            voyage_df.to_csv(voyage_path, index=False)
-            print(f"Saved voyage data: {len(voyage_df)} records -> {voyage_path}")
-        
-        if len(stop_df) > 0:
-            # 过滤异常停靠时间（超过7天=168小时的可能是数据问题）
-            stop_df = stop_df[(stop_df['duration_hours'] >= 1) & (stop_df['duration_hours'] <= 168)]
-            stop_path = self.output_dir / 'port_stops.csv'
-            stop_df.to_csv(stop_path, index=False)
-            print(f"Saved stop data: {len(stop_df)} records -> {stop_path}")
+    except Exception as e:
+        print(f"Error processing {file_stem}: {e}")
+        return (file_stem, 0, 0, 0)
 
 
-def print_summary(voyage_df: pd.DataFrame, stop_df: pd.DataFrame):
-    """打印数据摘要"""
-    print("\n" + "="*50)
-    print("数据摘要")
-    print("="*50)
+def merge_results(output_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """流式合并所有临时文件（内存优化）"""
+    temp_dir = output_dir / 'temp'
     
-    if len(voyage_df) > 0:
-        print(f"\n【航程数据】")
-        print(f"  总数据点: {len(voyage_df):,}")
-        print(f"  船舶数量: {voyage_df['mmsi'].nunique()}")
-        print(f"  剩余时间范围: {voyage_df['remaining_hours'].min():.1f} ~ {voyage_df['remaining_hours'].max():.1f} 小时")
-        print(f"  速度范围: {voyage_df['sog'].min():.1f} ~ {voyage_df['sog'].max():.1f} 节")
-        
-        # 按船舶统计
-        print(f"\n  各船航程时长:")
-        for mmsi, group in voyage_df.groupby('mmsi'):
-            duration = group['voyage_duration_hours'].iloc[0]
-            print(f"    {mmsi}: {duration:.1f} 小时 ({duration/24:.1f} 天), {len(group):,} 点")
+    # 合并航程数据 - 流式处理
+    voyage_files = list(temp_dir.glob('*_voyage.parquet'))
+    print(f"  合并 {len(voyage_files)} 个航程文件...")
     
-    if len(stop_df) > 0:
-        print(f"\n【港口停靠数据】")
-        print(f"  总停靠次数: {len(stop_df)}")
-        print(f"  停靠时长: {stop_df['duration_hours'].min():.1f} ~ {stop_df['duration_hours'].max():.1f} 小时")
+    if voyage_files:
+        # 分批合并，每次最多100个文件
+        batch_size = 100
+        merged_files = []
         
-        print(f"\n  按区域统计:")
-        region_stats = stop_df.groupby('region')['duration_hours'].agg(['mean', 'count'])
-        for region, row in region_stats.iterrows():
-            print(f"    {region}: 平均 {row['mean']:.1f} 小时, {int(row['count'])} 次")
+        for i in range(0, len(voyage_files), batch_size):
+            batch = voyage_files[i:i+batch_size]
+            batch_dfs = [pd.read_parquet(f) for f in batch]
+            batch_combined = pd.concat(batch_dfs, ignore_index=True)
+            
+            # 保存中间结果
+            merged_path = temp_dir / f'merged_voyage_{i//batch_size}.parquet'
+            batch_combined.to_parquet(merged_path, index=False)
+            merged_files.append(merged_path)
+            
+            del batch_dfs, batch_combined
+            gc.collect()
+        
+        # 最终合并
+        if len(merged_files) > 1:
+            final_dfs = [pd.read_parquet(f) for f in merged_files]
+            voyage_combined = pd.concat(final_dfs, ignore_index=True)
+            del final_dfs
+        else:
+            voyage_combined = pd.read_parquet(merged_files[0])
+        
+        gc.collect()
+    else:
+        voyage_combined = pd.DataFrame()
+    
+    # 合并停靠数据
+    stop_files = list(temp_dir.glob('*_stops.parquet'))
+    print(f"  合并 {len(stop_files)} 个停靠文件...")
+    
+    if stop_files:
+        stop_dfs = []
+        for f in stop_files:
+            stop_dfs.append(pd.read_parquet(f))
+            if len(stop_dfs) >= 100:
+                # 批量合并
+                combined = pd.concat(stop_dfs, ignore_index=True)
+                stop_dfs = [combined]
+                gc.collect()
+        
+        stop_combined = pd.concat(stop_dfs, ignore_index=True) if stop_dfs else pd.DataFrame()
+        del stop_dfs
+        gc.collect()
+    else:
+        stop_combined = pd.DataFrame()
+    
+    return voyage_combined, stop_combined
 
 
-def filter_data_quality(voyage_df: pd.DataFrame, stop_df: pd.DataFrame, 
-                        min_points: int = 50, 
-                        min_points_per_day: float = 10.0,
+def filter_data_quality(voyage_df: pd.DataFrame, stop_df: pd.DataFrame,
                         max_stop_hours: float = 168.0,
                         min_stop_hours: float = 4.0) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """数据质量过滤"""
     print("\n数据质量过滤...")
     
     original_voyages = len(voyage_df)
-    original_ships = voyage_df['mmsi'].nunique() if len(voyage_df) > 0 else 0
+    original_voyage_count = voyage_df['voyage_id'].nunique() if len(voyage_df) > 0 else 0
     
-    # 过滤航程数据
-    valid_ships = []
-    if len(voyage_df) > 0:
-        # 计算每艘船的数据密度
-        ship_stats = []
-        for mmsi, group in voyage_df.groupby('mmsi'):
-            n_points = len(group)
-            duration_hours = group['voyage_duration_hours'].iloc[0]
-            duration_days = duration_hours / 24
-            points_per_day = n_points / duration_days if duration_days > 0 else 0
-            ship_stats.append({
-                'mmsi': mmsi,
-                'n_points': n_points,
-                'duration_days': duration_days,
-                'points_per_day': points_per_day
-            })
-        
-        stats_df = pd.DataFrame(ship_stats)
-        
-        # 过滤条件：数据点>=50 且 每天至少10个点
-        valid_ships = stats_df[
-            (stats_df['n_points'] >= min_points) & 
-            (stats_df['points_per_day'] >= min_points_per_day)
-        ]['mmsi'].tolist()
-        
-        # 打印被过滤掉的船
-        filtered_ships = stats_df[~stats_df['mmsi'].isin(valid_ships)]
-        if len(filtered_ships) > 0:
-            print(f"  过滤掉 {len(filtered_ships)} 艘数据稀疏的船:")
-            for _, row in filtered_ships.iterrows():
-                print(f"    {row['mmsi']}: {row['n_points']:.0f}点, {row['duration_days']:.1f}天, {row['points_per_day']:.1f}点/天")
-        
-        voyage_df = voyage_df[voyage_df['mmsi'].isin(valid_ships)].copy()
-    
-    # 过滤停靠数据
+    # 航程数据已经在process_single_ship中过滤过了，这里主要过滤停靠数据
     if len(stop_df) > 0:
         original_stops = len(stop_df)
-        # 1. 只保留有效船舶的停靠数据
-        stop_df = stop_df[stop_df['mmsi'].isin(valid_ships)].copy()
-        # 2. 过滤异常停靠时间（太短或太长）
-        stop_df = stop_df[(stop_df['duration_hours'] >= min_stop_hours) & (stop_df['duration_hours'] <= max_stop_hours)].copy()
-        print(f"  停靠数据: {original_stops} -> {len(stop_df)} (过滤无效船舶和异常停靠时间)")
+        # 过滤异常停靠时间
+        stop_df = stop_df[(stop_df['duration_hours'] >= min_stop_hours) & 
+                          (stop_df['duration_hours'] <= max_stop_hours)].copy()
+        print(f"  停靠数据: {original_stops:,} -> {len(stop_df):,}")
     
-    print(f"  航程数据: {original_voyages} -> {len(voyage_df)} ({original_ships} -> {voyage_df['mmsi'].nunique()} 艘船)")
+    final_voyage_count = voyage_df['voyage_id'].nunique() if len(voyage_df) > 0 else 0
+    print(f"  航程数据: {original_voyages:,} 条, {final_voyage_count:,} 个航程")
     
     return voyage_df, stop_df
 
 
+def print_summary(voyage_df: pd.DataFrame, stop_df: pd.DataFrame):
+    """打印数据摘要"""
+    print("\n" + "="*60)
+    print("数据摘要")
+    print("="*60)
+    
+    if len(voyage_df) > 0:
+        n_voyages = voyage_df['voyage_id'].nunique()
+        n_ships = voyage_df['mmsi'].nunique()
+        
+        print(f"\n【航程数据】")
+        print(f"  总数据点: {len(voyage_df):,}")
+        print(f"  航程数量: {n_voyages:,}")
+        print(f"  船舶数量: {n_ships:,}")
+        print(f"  剩余时间范围: {voyage_df['remaining_hours'].min():.1f} ~ {voyage_df['remaining_hours'].max():.1f} 小时")
+        print(f"  速度范围: {voyage_df['sog'].min():.1f} ~ {voyage_df['sog'].max():.1f} 节")
+        
+        # 航程时长分布
+        voyage_stats = voyage_df.groupby('voyage_id').agg({
+            'voyage_duration_hours': 'first',
+            'mmsi': 'count'
+        }).rename(columns={'mmsi': 'points'})
+        
+        print(f"\n  航程时长分布:")
+        duration_bins = [0, 6, 12, 24, 48, 96, 168, 336, float('inf')]
+        labels = ['6-12h', '12-24h', '1-2d', '2-4d', '4-7d', '7-14d', '>14d']
+        voyage_stats['duration_bin'] = pd.cut(voyage_stats['voyage_duration_hours'], 
+                                               bins=duration_bins, labels=['<6h'] + labels)
+        dist = voyage_stats['duration_bin'].value_counts().sort_index()
+        for label, count in dist.items():
+            if count > 0:
+                print(f"    {label}: {count:,} 个航程")
+    
+    if len(stop_df) > 0:
+        print(f"\n【港口停靠数据】")
+        print(f"  总停靠次数: {len(stop_df):,}")
+        print(f"  停靠时长: {stop_df['duration_hours'].min():.1f} ~ {stop_df['duration_hours'].max():.1f} 小时")
+        
+        print(f"\n  按区域统计:")
+        region_stats = stop_df.groupby('region')['duration_hours'].agg(['mean', 'count'])
+        for region, row in region_stats.iterrows():
+            print(f"    {region}: 平均 {row['mean']:.1f}h, {int(row['count']):,} 次")
+
+
 def main():
-    parser = argparse.ArgumentParser(description='AIS数据预处理')
+    parser = argparse.ArgumentParser(description='并行化AIS数据预处理（内存优化版）')
     parser.add_argument('--data_dir', type=str, default='./data', help='原始数据目录')
     parser.add_argument('--output_dir', type=str, default='./output/processed', help='输出目录')
+    parser.add_argument('--workers', type=int, default=4, help='并行工作进程数（默认4，降低内存占用）')
     parser.add_argument('--max_files', type=int, default=None, help='最多处理文件数（用于测试）')
-    parser.add_argument('--min_points', type=int, default=50, help='每艘船最少数据点数')
-    parser.add_argument('--min_points_per_day', type=float, default=10.0, help='每天最少数据点数')
+    parser.add_argument('--chunk_size', type=int, default=500000, help='CSV分块读取大小（默认50万行）')
     
     args = parser.parse_args()
     
-    print("="*50)
-    print("AIS数据预处理")
-    print("="*50)
+    # 设置并行数 - 限制以控制内存
+    n_workers = min(args.workers, cpu_count())
+    
+    print("="*60)
+    print("并行化AIS数据预处理（内存优化版）")
+    print("="*60)
     print(f"数据目录: {args.data_dir}")
     print(f"输出目录: {args.output_dir}")
+    print(f"并行进程数: {n_workers} (建议64GB内存使用4进程)")
+    print(f"分块大小: {args.chunk_size:,} 行/块")
+    print(f"CPU核心数: {cpu_count()}")
     
-    processor = DataProcessor(args.data_dir, args.output_dir)
-    voyage_df, stop_df = processor.process_all(max_files=args.max_files)
+    # 获取文件列表
+    data_dir = Path(args.data_dir)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    csv_files = sorted([f for f in data_dir.glob('*-ais.csv') if not f.name.startswith('._')])
+    if args.max_files:
+        csv_files = csv_files[:args.max_files]
+    
+    print(f"\n找到 {len(csv_files)} 个AIS文件")
+    
+    # 准备并行任务 - 传递chunk_size参数
+    tasks = [(str(f), str(output_dir), args.chunk_size) for f in csv_files]
+    
+    # 并行处理
+    print("\n开始并行处理...")
+    from tqdm import tqdm
+    
+    results = []
+    with Pool(n_workers) as pool:
+        for result in tqdm(pool.imap(process_single_file, tasks), total=len(tasks), desc='Processing'):
+            results.append(result)
+            gc.collect()  # 每完成一个文件强制GC
+    
+    # 打印每个文件的处理结果
+    print("\n各文件处理结果:")
+    total_ships = 0
+    total_voyages = 0
+    total_points = 0
+    for file_stem, n_ships, n_voyages, n_points in results:
+        if n_voyages > 0:
+            print(f"  {file_stem}: {n_ships} 艘船, {n_voyages} 个航程, {n_points:,} 点")
+            total_ships += n_ships
+            total_voyages += n_voyages
+            total_points += n_points
+    
+    print(f"\n处理完成: 共 {total_ships} 艘船, {total_voyages} 个航程, {total_points:,} 点")
+    
+    # 合并结果
+    print("\n合并临时文件...")
+    voyage_df, stop_df = merge_results(output_dir)
     
     if len(voyage_df) == 0:
         print("\n警告: 未提取到有效航程数据!")
         return
     
     # 数据质量过滤
-    voyage_df, stop_df = filter_data_quality(
-        voyage_df, stop_df,
-        min_points=args.min_points,
-        min_points_per_day=args.min_points_per_day
-    )
+    voyage_df, stop_df = filter_data_quality(voyage_df, stop_df)
     
-    if len(voyage_df) == 0:
-        print("\n警告: 过滤后无有效数据!")
-        return
+    # 保存最终结果
+    voyage_path = output_dir / 'processed_voyages.csv'
+    voyage_df.to_csv(voyage_path, index=False)
+    print(f"\n保存航程数据: {len(voyage_df):,} 条 -> {voyage_path}")
     
-    processor.save(voyage_df, stop_df)
+    if len(stop_df) > 0:
+        stop_path = output_dir / 'port_stops.csv'
+        stop_df.to_csv(stop_path, index=False)
+        print(f"保存停靠数据: {len(stop_df):,} 条 -> {stop_path}")
+    
+    # 清理临时文件
+    temp_dir = output_dir / 'temp'
+    if temp_dir.exists():
+        import shutil
+        shutil.rmtree(temp_dir)
+        print("清理临时文件完成")
+    
     print_summary(voyage_df, stop_df)
-    
     print("\n预处理完成!")
 
 
