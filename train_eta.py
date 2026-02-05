@@ -150,13 +150,14 @@ def _compute_geom_features(group: pd.DataFrame) -> pd.DataFrame:
     else:
         voyage_progress = np.zeros(n, dtype=np.float32)
     
-    # 5. 短期航速均值（最近5个点）- 平滑当前航速
+    # 5. 短期航速均值（最近5个点）- 仅使用历史（避免泄露未来）
     window = 5
-    sog_short_avg = np.convolve(sog, np.ones(window)/window, mode='same')
-    # 边界处理
-    for i in range(window // 2):
-        sog_short_avg[i] = np.mean(sog[:i+1])
-        sog_short_avg[n-1-i] = np.mean(sog[n-1-i:])
+    cumsum = np.cumsum(np.insert(sog, 0, 0.0))
+    sog_short_avg = np.zeros(n, dtype=np.float32)
+    for i in range(n):
+        start = max(0, i - window + 1)
+        count = i - start + 1
+        sog_short_avg[i] = (cumsum[i + 1] - cumsum[start]) / count
     
     group['sog_hist_mean'] = sog_hist_mean.astype(np.float32)
     group['sog_hist_std'] = sog_hist_std.astype(np.float32)
