@@ -1023,6 +1023,7 @@ def main():
     
     # 训练参数
     parser.add_argument('--batch_size', type=int, default=256)
+    parser.add_argument('--num_workers', type=int, default=8, help='DataLoader并行加载线程数')
     parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--scheduler', type=str, default='plateau', 
@@ -1139,9 +1140,9 @@ def main():
                 cache_dir / "y_test.npy", cache_dir / "sd_test.npy"
             )
             
-            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
-            val_loader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=2, pin_memory=True)
-            test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=2, pin_memory=True)
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
+            val_loader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=True)
+            test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=True)
             
             # 为评估阶段准备
             X_test = np.load(cache_dir / "X_test.npy", mmap_mode='r')
@@ -1585,9 +1586,9 @@ def main():
                 cache_dir / "y_test.npy", cache_dir / "sd_test.npy"
             )
             
-            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
-            val_loader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=2, pin_memory=True)
-            test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=2, pin_memory=True)
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
+            val_loader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=True)
+            test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=True)
             
             # 为评估阶段准备（需要完整加载test数据）
             X_test = np.load(cache_dir / "X_test.npy", mmap_mode='r')
