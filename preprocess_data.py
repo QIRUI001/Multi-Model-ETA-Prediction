@@ -361,6 +361,60 @@ def print_summary(voyage_df: pd.DataFrame, stop_df: pd.DataFrame):
             print(f"    {region}: 平均 {row['mean']:.1f}h, {int(row['count']):,} 次")
 
 
+def process_new_voyage_file(args) -> Tuple[str, int, int]:
+    """处理 data_new/ 中的单个航程文件（每个文件 = 一个完整航程）"""
+    csv_file, output_dir = args
+    temp_dir = Path(output_dir) / 'temp'
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    
+    uuid = Path(csv_file).stem  # UUID 作为 voyage_id
+    
+    try:
+        df = pd.read_csv(csv_file, usecols=REQUIRED_COLS, low_memory=False)
+        df = df.dropna(subset=['mmsi', 'postime', 'lon', 'lat', 'sog', 'cog'])
+        
+        if len(df) < MIN_POINTS:
+            return (uuid, 0, 0)
+        
+        df['postime'] = pd.to_datetime(df['postime'], utc=True)
+        df = df.sort_values('postime')
+        
+        # 基础过滤
+        df = df[(df['sog'] >= 0) & (df['sog'] <= 30)]
+        
+        # 计算航程时长
+        start_time = df['postime'].iloc[0]
+        end_time = df['postime'].iloc[-1]
+        duration_hours = (end_time - start_time).total_seconds() / 3600
+        
+        if duration_hours < MIN_SEGMENT_HOURS:
+            return (uuid, 0, 0)
+        
+        # 数据密度检查
+        duration_days = duration_hours / 24
+        if duration_days > 0 and len(df) / duration_days < MIN_POINTS_PER_DAY:
+            return (uuid, 0, 0)
+        
+        # 添加必要的列
+        mmsi = int(df['mmsi'].iloc[0])
+        df['voyage_id'] = f"new_{uuid}"
+        df['voyage_duration_hours'] = duration_hours
+        df['remaining_hours'] = (end_time - df['postime']).dt.total_seconds() / 3600
+        df['mmsi'] = mmsi
+        
+        # postime 转为不带时区的字符串（与原始数据一致）
+        df['postime'] = df['postime'].dt.tz_localize(None).astype(str)
+        
+        # 保存
+        vpath = temp_dir / f'new_{uuid}_voyage.parquet'
+        df.to_parquet(vpath, index=False)
+        
+        return (uuid, 1, len(df))
+    
+    except Exception as e:
+        return (uuid, 0, 0)
+
+
 def main():
     parser = argparse.ArgumentParser(description='并行化AIS数据预处理（内存优化版）')
     parser.add_argument('--data_dir', type=str, default='./data', help='原始数据目录')
@@ -392,7 +446,11 @@ def main():
     if args.max_files:
         csv_files = csv_files[:args.max_files]
     
-    print(f"\n找到 {len(csv_files)} 个AIS文件")
+    # 检查 data_new/ 目录（逐航程CSV文件）
+    new_data_dir = data_dir / 'data_new'
+    new_csv_files = sorted(new_data_dir.glob('*.csv')) if new_data_dir.exists() else []
+    
+    print(f"\n找到 {len(csv_files)} 个AIS文件, {len(new_csv_files)} 个新航程文件")
     
     # 准备并行任务 - 传递chunk_size参数
     tasks = [(str(f), str(output_dir), args.chunk_size) for f in csv_files]
@@ -420,6 +478,23 @@ def main():
             total_points += n_points
     
     print(f"\n处理完成: 共 {total_ships} 艘船, {total_voyages} 个航程, {total_points:,} 点")
+    
+    # 处理 data_new/ 中的逐航程文件
+    if new_csv_files:
+        print(f"\n处理 {len(new_csv_files)} 个新航程文件...")
+        new_tasks = [(str(f), str(output_dir)) for f in new_csv_files]
+        
+        new_total_voyages = 0
+        new_total_points = 0
+        with Pool(n_workers) as pool:
+            for result in tqdm(pool.imap_unordered(process_new_voyage_file, new_tasks), 
+                              total=len(new_tasks), desc='New voyages'):
+                uuid, n_v, n_p = result
+                new_total_voyages += n_v
+                new_total_points += n_p
+                gc.collect()
+        
+        print(f"新航程数据: {new_total_voyages} 个航程, {new_total_points:,} 点")
     
     # 合并结果
     print("\n合并临时文件...")

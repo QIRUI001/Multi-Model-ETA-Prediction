@@ -4,3 +4,5 @@ papers
 uv.lock
 output
 .venv
+.github
+tmp
