@@ -402,8 +402,8 @@ def process_new_voyage_file(args) -> Tuple[str, int, int]:
         df['remaining_hours'] = (end_time - df['postime']).dt.total_seconds() / 3600
         df['mmsi'] = mmsi
         
-        # postime 转为不带时区的字符串（与原始数据一致）
-        df['postime'] = df['postime'].dt.tz_localize(None).astype(str)
+        # postime 去掉时区（与原始数据一致，保持datetime64类型）
+        df['postime'] = df['postime'].dt.tz_localize(None)
         
         # 保存
         vpath = temp_dir / f'new_{uuid}_voyage.parquet'
