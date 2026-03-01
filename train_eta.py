@@ -138,17 +138,10 @@ def _compute_geom_features(group: pd.DataFrame) -> pd.DataFrame:
     sog_deviation[mask] = sog[mask] / sog_hist_mean[mask]
     sog_deviation = np.clip(sog_deviation, 0.1, 3.0)  # 限制范围
     
-    # 4. 航程进度（已航行时间 / 总航程时间估计）
-    # 使用 remaining_hours 来计算进度
-    if 'remaining_hours' in group.columns:
-        total_hours = group['remaining_hours'].iloc[0]  # 航程开始时的remaining_hours即为总时长
-        if total_hours > 0:
-            voyage_progress = 1.0 - (group['remaining_hours'].values / total_hours)
-            voyage_progress = np.clip(voyage_progress, 0.0, 1.0)
-        else:
-            voyage_progress = np.zeros(n, dtype=np.float32)
-    else:
-        voyage_progress = np.zeros(n, dtype=np.float32)
+    # 4. 航程进度（基于距离，不使用 remaining_hours 避免目标泄露）
+    # 使用 dist_to_dest 相对于初始距离来估算进度
+    dist_start = dist_km[0] if dist_km[0] > 1.0 else 1.0  # 避免除零
+    voyage_progress = np.clip(1.0 - (dist_km / dist_start), 0.0, 1.0).astype(np.float32)
     
     # 5. 短期航速均值（最近5个点）- 仅使用历史（避免泄露未来）
     window = 5
@@ -179,7 +172,7 @@ def build_decoder_input(X, label_len, pred_len):
 class MemmapDataset(torch.utils.data.Dataset):
     """支持memmap的数据集，避免全部加载到内存"""
     
-    def __init__(self, X_path, X_mark_enc_path, X_dec_path, X_mark_dec_path, y_path, sd_path):
+    def __init__(self, X_path, X_mark_enc_path, X_dec_path, X_mark_dec_path, y_path, sd_path, actual_length=None):
         # 使用memmap模式打开文件（只读，不加载到内存）
         self.X = np.load(X_path, mmap_mode='r')
         self.X_mark_enc = np.load(X_mark_enc_path, mmap_mode='r')
@@ -187,7 +180,8 @@ class MemmapDataset(torch.utils.data.Dataset):
         self.X_mark_dec = np.load(X_mark_dec_path, mmap_mode='r')
         self.y = np.load(y_path, mmap_mode='r')
         self.sd = np.load(sd_path, mmap_mode='r')
-        self.length = len(self.y)
+        # 使用实际写入的长度（避免memmap尾部零填充样本）
+        self.length = actual_length if actual_length is not None else len(self.y)
     
     def __len__(self):
         return self.length
@@ -727,7 +721,7 @@ class InformerTrainer:
         self.model = model.to(device)
         self.device = device
         self.criterion = nn.HuberLoss(delta=1.0)
-        self.optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+        self.optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
         self.scheduler_type = scheduler_type
         self.start_epoch = 0
         self.best_val_loss = float('inf')
@@ -1019,13 +1013,13 @@ def main():
     parser.add_argument('--e_layers', type=int, default=4)
     parser.add_argument('--d_layers', type=int, default=2)
     parser.add_argument('--d_ff', type=int, default=3072)
-    parser.add_argument('--dropout', type=float, default=0.05)
+    parser.add_argument('--dropout', type=float, default=0.2)
     
     # 训练参数
     parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--num_workers', type=int, default=8, help='DataLoader并行加载线程数')
-    parser.add_argument('--epochs', type=int, default=5)
-    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--scheduler', type=str, default='plateau', 
                         choices=['plateau', 'cosine', 'cosine_restart', 'onecycle'],
                         help='学习率调度器: plateau(默认), cosine, cosine_restart, onecycle')
@@ -1124,20 +1118,31 @@ def main():
             dataset = VoyageETADataset(seq_len=args.seq_len, label_len=args.label_len, pred_len=args.pred_len)
             dataset.load_params(os.path.join(args.output_dir, 'norm_params.npz'))
             
+            # 加载实际写入的序列数（避免memmap尾部零填充样本）
+            counts_path = cache_dir / "actual_counts.npy"
+            actual_counts = None
+            if counts_path.exists():
+                actual_counts = np.load(counts_path, allow_pickle=True).item()
+                print(f"使用实际序列数: train={actual_counts.get('train', '?'):,}, "
+                      f"val={actual_counts.get('val', '?'):,}, test={actual_counts.get('test', '?'):,}")
+            
             train_dataset = MemmapDataset(
                 cache_dir / "X_train.npy", cache_dir / "X_mark_enc_train.npy",
                 cache_dir / "X_dec_train.npy", cache_dir / "X_mark_dec_train.npy",
-                cache_dir / "y_train.npy", cache_dir / "sd_train.npy"
+                cache_dir / "y_train.npy", cache_dir / "sd_train.npy",
+                actual_length=actual_counts.get('train') if actual_counts else None
             )
             val_dataset = MemmapDataset(
                 cache_dir / "X_val.npy", cache_dir / "X_mark_enc_val.npy",
                 cache_dir / "X_dec_val.npy", cache_dir / "X_mark_dec_val.npy",
-                cache_dir / "y_val.npy", cache_dir / "sd_val.npy"
+                cache_dir / "y_val.npy", cache_dir / "sd_val.npy",
+                actual_length=actual_counts.get('val') if actual_counts else None
             )
             test_dataset = MemmapDataset(
                 cache_dir / "X_test.npy", cache_dir / "X_mark_enc_test.npy",
                 cache_dir / "X_dec_test.npy", cache_dir / "X_mark_dec_test.npy",
-                cache_dir / "y_test.npy", cache_dir / "sd_test.npy"
+                cache_dir / "y_test.npy", cache_dir / "sd_test.npy",
+                actual_length=actual_counts.get('test') if actual_counts else None
             )
             
             train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
@@ -1567,6 +1572,8 @@ def main():
             # 保存归一化参数和meta
             dataset.save_params(os.path.join(args.output_dir, 'norm_params.npz'))
             np.save(cache_dir / "test_meta.npy", test_meta, allow_pickle=True)
+            # 保存实际写入的序列数
+            np.save(cache_dir / "actual_counts.npy", {'train': train_idx, 'val': val_idx, 'test': test_idx}, allow_pickle=True)
             
             # 使用memmap模式加载数据创建DataLoader
             print("创建DataLoader (memmap模式)...")

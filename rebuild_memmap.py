@@ -55,6 +55,21 @@ def main():
         return
     print(f"找到 {len(bucket_files)} 个分桶文件")
 
+    # ========== 按 bucket_id 分组（合并同一 bucket 的多个 part，修复拆分航程问题） ==========
+    from collections import defaultdict
+    bucket_groups = defaultdict(list)
+    for bf in bucket_files:
+        # 文件名格式: bucket_5_part_0.pkl
+        bucket_id = int(bf.stem.split('_')[1])
+        bucket_groups[bucket_id].append(bf)
+    bucket_ids_sorted = sorted(bucket_groups.keys())
+    print(f"合并为 {len(bucket_ids_sorted)} 个逻辑桶")
+
+    def load_merged_bucket(bucket_id):
+        """加载并合并同一 bucket 的所有 part 文件"""
+        parts = [pd.read_pickle(f) for f in bucket_groups[bucket_id]]
+        return pd.concat(parts, ignore_index=True)
+
     # 删除旧的 npy 文件
     for f in cache_dir.glob("*.npy"):
         f.unlink()
@@ -63,8 +78,8 @@ def main():
     # ========== 收集所有 voyage_id ==========
     print("收集 voyage_id ...")
     all_voyage_ids = set()
-    for bf in bucket_files:
-        df = pd.read_pickle(bf)
+    for bid in bucket_ids_sorted:
+        df = load_merged_bucket(bid)
         all_voyage_ids.update(df['voyage_id'].unique())
         del df
 
@@ -90,10 +105,12 @@ def main():
     feat_max = None
     count, mean, m2 = 0, 0.0, 0.0
 
-    for bf in tqdm(bucket_files, desc="Pass A"):
-        df_bucket = pd.read_pickle(bf)
+    for bid in tqdm(bucket_ids_sorted, desc="Pass A"):
+        df_bucket = load_merged_bucket(bid)
         df_bucket = df_bucket[df_bucket['voyage_id'].isin(train_ids)]
         if len(df_bucket) == 0:
+            del df_bucket
+            gc.collect()
             continue
         for _, group in df_bucket.groupby('voyage_id'):
             group = _compute_geom_features(group)
@@ -118,8 +135,8 @@ def main():
         'test':  {'ids': test_ids,  'new_seqs': 0, 'old_seqs': 0},
     }
 
-    for bf in tqdm(bucket_files, desc="Pass B"):
-        df_bucket = pd.read_pickle(bf)
+    for bid in tqdm(bucket_ids_sorted, desc="Pass B"):
+        df_bucket = load_merged_bucket(bid)
         for vid, group in df_bucket.groupby('voyage_id'):
             n_seq = max(0, len(group) - args.seq_len - args.pred_len + 1)
             if n_seq == 0:
@@ -169,9 +186,11 @@ def main():
     idxs = {'train': 0, 'val': 0, 'test': 0}
     meta_list = []
 
-    for bf_idx, bf in enumerate(bucket_files):
-        df_bucket = pd.read_pickle(bf)
+    for bi, bid in enumerate(bucket_ids_sorted):
+        df_bucket = load_merged_bucket(bid)
         if len(df_bucket) == 0:
+            del df_bucket
+            gc.collect()
             continue
         df_bucket['mmsi'] = df_bucket['mmsi'].astype('int32')
 
@@ -247,8 +266,8 @@ def main():
         del df_bucket
         gc.collect()
 
-        if (bf_idx + 1) % 8 == 0:
-            print(f"  进度: {bf_idx+1}/{len(bucket_files)} buckets, "
+        if (bi + 1) % 4 == 0:
+            print(f"  进度: {bi+1}/{len(bucket_ids_sorted)} buckets, "
                   f"train={idxs['train']:,}/{target_counts['train']['total']:,}, "
                   f"val={idxs['val']:,}/{target_counts['val']['total']:,}, "
                   f"test={idxs['test']:,}/{target_counts['test']['total']:,}")
@@ -258,6 +277,11 @@ def main():
         for arr in memmaps[name]:
             del arr
     gc.collect()
+
+    # 保存实际写入的序列数（解决 memmap 尾部零填充问题）
+    actual_counts = {name: idxs[name] for name in ['train', 'val', 'test']}
+    np.save(cache_dir / "actual_counts.npy", actual_counts, allow_pickle=True)
+    print(f"\n实际写入序列数已保存: {actual_counts}")
 
     # 合并 meta
     if meta_list:
@@ -275,7 +299,7 @@ def main():
     print(f"\n=== 完成 ===")
     print(f"最终序列: train={idxs['train']:,}, val={idxs['val']:,}, test={idxs['test']:,}")
     print(f"缓存目录: {cache_dir}")
-    print(f"\n下一步: python train_eta.py --use_cache --scheduler onecycle --max_voyages {args.max_voyages} --max_sequences {args.max_sequences}")
+    print(f"\n下一步: python train_eta.py --use_cache --scheduler cosine --max_voyages {args.max_voyages} --max_sequences {args.max_sequences}")
 
 
 if __name__ == '__main__':
