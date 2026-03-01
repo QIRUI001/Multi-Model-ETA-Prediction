@@ -1016,13 +1016,15 @@ def main():
     parser.add_argument('--dropout', type=float, default=0.2)
     
     # 训练参数
-    parser.add_argument('--batch_size', type=int, default=256)
+    parser.add_argument('--batch_size', type=int, default=3072)
     parser.add_argument('--num_workers', type=int, default=8, help='DataLoader并行加载线程数')
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--scheduler', type=str, default='plateau', 
                         choices=['plateau', 'cosine', 'cosine_restart', 'onecycle'],
                         help='学习率调度器: plateau(默认), cosine, cosine_restart, onecycle')
+    parser.add_argument('--early_stopping_patience', type=int, default=3,
+                        help='验证损失连续N个epoch未改善则停止训练（0=禁用）')
     parser.add_argument('--resume', action='store_true', help='从checkpoint继续训练')
     
     # 港口模型
@@ -1722,6 +1724,7 @@ def main():
         print(f"\n使用学习率调度器: {args.scheduler}")
         print(f"初始学习率: {args.lr:.2e}")
         
+        no_improve_count = 0
         for epoch in range(start_epoch, args.epochs):
             train_loss = trainer.train_epoch(train_loader)
             val_loss = trainer.validate(val_loader)
@@ -1737,6 +1740,13 @@ def main():
                 best_val_loss = val_loss
                 trainer.save(model_path)
                 print("  -> 保存最佳模型!")
+                no_improve_count = 0
+            else:
+                no_improve_count += 1
+                print(f"  验证损失未改善 ({no_improve_count}/{args.early_stopping_patience})")
+                if args.early_stopping_patience > 0 and no_improve_count >= args.early_stopping_patience:
+                    print(f"\n早停: 验证损失连续 {args.early_stopping_patience} 个 epoch 未改善，停止训练。")
+                    break
         
         # 训练后加载最佳模型
         trainer.load(model_path)
