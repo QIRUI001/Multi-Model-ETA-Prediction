@@ -1540,17 +1540,20 @@ def main():
             train_dataset = MemmapDataset(
                 cache_dir / "X_train.npy", cache_dir / "X_mark_enc_train.npy",
                 cache_dir / "X_dec_train.npy", cache_dir / "X_mark_dec_train.npy",
-                cache_dir / "y_train.npy", cache_dir / "sd_train.npy"
+                cache_dir / "y_train.npy", cache_dir / "sd_train.npy",
+                actual_length=train_idx
             )
             val_dataset = MemmapDataset(
                 cache_dir / "X_val.npy", cache_dir / "X_mark_enc_val.npy",
                 cache_dir / "X_dec_val.npy", cache_dir / "X_mark_dec_val.npy",
-                cache_dir / "y_val.npy", cache_dir / "sd_val.npy"
+                cache_dir / "y_val.npy", cache_dir / "sd_val.npy",
+                actual_length=val_idx
             )
             test_dataset = MemmapDataset(
                 cache_dir / "X_test.npy", cache_dir / "X_mark_enc_test.npy",
                 cache_dir / "X_dec_test.npy", cache_dir / "X_mark_dec_test.npy",
-                cache_dir / "y_test.npy", cache_dir / "sd_test.npy"
+                cache_dir / "y_test.npy", cache_dir / "sd_test.npy",
+                actual_length=test_idx
             )
             
             train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
