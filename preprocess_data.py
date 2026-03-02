@@ -362,12 +362,16 @@ def print_summary(voyage_df: pd.DataFrame, stop_df: pd.DataFrame):
 
 
 def process_new_voyage_file(args) -> Tuple[str, int, int]:
-    """处理 data_new/ 中的单个航程文件（每个文件 = 一个完整航程）"""
+    """处理 data_new/ 中的单个航程文件
+    
+    与老数据使用相同的航段提取逻辑（按速度阈值分割航行/停靠段），
+    确保 remaining_hours 语义一致：= 当前航行段结束时间 - 当前时刻。
+    """
     csv_file, output_dir = args
     temp_dir = Path(output_dir) / 'temp'
     temp_dir.mkdir(parents=True, exist_ok=True)
     
-    uuid = Path(csv_file).stem  # UUID 作为 voyage_id
+    uuid = Path(csv_file).stem  # UUID 作为基础 ID
     
     try:
         df = pd.read_csv(csv_file, usecols=REQUIRED_COLS, low_memory=False)
@@ -382,34 +386,50 @@ def process_new_voyage_file(args) -> Tuple[str, int, int]:
         # 基础过滤
         df = df[(df['sog'] >= 0) & (df['sog'] <= 30)]
         
-        # 计算航程时长
-        start_time = df['postime'].iloc[0]
-        end_time = df['postime'].iloc[-1]
-        duration_hours = (end_time - start_time).total_seconds() / 3600
-        
-        if duration_hours < MIN_SEGMENT_HOURS:
+        if len(df) < MIN_POINTS:
             return (uuid, 0, 0)
         
-        # 数据密度检查
-        duration_days = duration_hours / 24
-        if duration_days > 0 and len(df) / duration_days < MIN_POINTS_PER_DAY:
-            return (uuid, 0, 0)
-        
-        # 添加必要的列
-        mmsi = int(df['mmsi'].iloc[0])
-        df['voyage_id'] = f"new_{uuid}"
-        df['voyage_duration_hours'] = duration_hours
-        df['remaining_hours'] = (end_time - df['postime']).dt.total_seconds() / 3600
-        df['mmsi'] = mmsi
-        
-        # postime 去掉时区（与原始数据一致，保持datetime64类型）
+        # postime 去掉时区（与原始数据一致）
         df['postime'] = df['postime'].dt.tz_localize(None)
         
-        # 保存
-        vpath = temp_dir / f'new_{uuid}_voyage.parquet'
-        df.to_parquet(vpath, index=False)
+        mmsi = int(df['mmsi'].iloc[0])
         
-        return (uuid, 1, len(df))
+        # 使用与老数据相同的航段提取逻辑：按速度阈值分割航行/停靠段
+        df['is_stopped'] = df['sog'] < STOP_SPEED_THRESHOLD
+        df['segment_change'] = df['is_stopped'].ne(df['is_stopped'].shift()).cumsum()
+        
+        voyage_dfs = []
+        segment_idx = 0
+        
+        for seg_id, group in df.groupby('segment_change'):
+            is_sailing = not group['is_stopped'].iloc[0]
+            start_time = group['postime'].iloc[0]
+            end_time = group['postime'].iloc[-1]
+            duration_hours = (end_time - start_time).total_seconds() / 3600
+            
+            if is_sailing and duration_hours >= MIN_SEGMENT_HOURS and len(group) >= MIN_POINTS:
+                # 检查数据密度
+                duration_days = duration_hours / 24
+                if duration_days > 0 and len(group) / duration_days >= MIN_POINTS_PER_DAY:
+                    # 有效航段
+                    seg_df = group.drop(columns=['is_stopped', 'segment_change']).copy()
+                    seg_df['mmsi'] = mmsi
+                    seg_df['voyage_id'] = f"new_{uuid}_{segment_idx}"
+                    seg_df['voyage_duration_hours'] = duration_hours
+                    seg_df['remaining_hours'] = (end_time - seg_df['postime']).dt.total_seconds() / 3600
+                    
+                    voyage_dfs.append(seg_df)
+                    segment_idx += 1
+        
+        n_voyages = len(voyage_dfs)
+        n_points = 0
+        
+        for vdf in voyage_dfs:
+            n_points += len(vdf)
+            vpath = temp_dir / f'new_{uuid}_{voyage_dfs.index(vdf)}_voyage.parquet'
+            vdf.to_parquet(vpath, index=False)
+        
+        return (uuid, n_voyages, n_points)
     
     except Exception as e:
         return (uuid, 0, 0)

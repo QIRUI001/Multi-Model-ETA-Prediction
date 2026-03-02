@@ -118,46 +118,6 @@ def _compute_geom_features(group: pd.DataFrame) -> pd.DataFrame:
     group['dist_to_dest_km'] = dist_km
     group['bearing_diff'] = bearing_diff
     
-    # === 航速增强特征 ===
-    sog = group['sog'].values.astype(np.float32)
-    n = len(sog)
-    
-    # 1. 历史累积平均航速（从航程开始到当前时刻）
-    sog_cumsum = np.cumsum(sog)
-    sog_hist_mean = sog_cumsum / np.arange(1, n + 1)
-    
-    # 2. 历史航速标准差（滑动计算）
-    sog_hist_std = np.zeros(n, dtype=np.float32)
-    for i in range(1, n):
-        sog_hist_std[i] = np.std(sog[:i+1]) if i > 0 else 0.0
-    
-    # 3. 当前航速与历史均值的偏差比（异常检测）
-    # sog_deviation > 1 表示当前比历史快，< 1 表示比历史慢
-    sog_deviation = np.ones(n, dtype=np.float32)
-    mask = sog_hist_mean > 0.5  # 避免除零
-    sog_deviation[mask] = sog[mask] / sog_hist_mean[mask]
-    sog_deviation = np.clip(sog_deviation, 0.1, 3.0)  # 限制范围
-    
-    # 4. 航程进度（基于距离，不使用 remaining_hours 避免目标泄露）
-    # 使用 dist_to_dest 相对于初始距离来估算进度
-    dist_start = dist_km[0] if dist_km[0] > 1.0 else 1.0  # 避免除零
-    voyage_progress = np.clip(1.0 - (dist_km / dist_start), 0.0, 1.0).astype(np.float32)
-    
-    # 5. 短期航速均值（最近5个点）- 仅使用历史（避免泄露未来）
-    window = 5
-    cumsum = np.cumsum(np.insert(sog, 0, 0.0))
-    sog_short_avg = np.zeros(n, dtype=np.float32)
-    for i in range(n):
-        start = max(0, i - window + 1)
-        count = i - start + 1
-        sog_short_avg[i] = (cumsum[i + 1] - cumsum[start]) / count
-    
-    group['sog_hist_mean'] = sog_hist_mean.astype(np.float32)
-    group['sog_hist_std'] = sog_hist_std.astype(np.float32)
-    group['sog_deviation'] = sog_deviation.astype(np.float32)
-    group['voyage_progress'] = voyage_progress.astype(np.float32)
-    group['sog_short_avg'] = sog_short_avg.astype(np.float32)
-    
     return group
 
 
@@ -198,11 +158,10 @@ class MemmapDataset(torch.utils.data.Dataset):
         )
 
 
-def create_memmap_arrays(cache_dir: Path, n_samples: int, seq_len: int, label_len: int, pred_len: int, n_features: int = 11, prefix: str = 'train'):
+def create_memmap_arrays(cache_dir: Path, n_samples: int, seq_len: int, label_len: int, pred_len: int, n_features: int = 6, prefix: str = 'train'):
     """创建memmap数组用于增量写入序列
     
-    n_features = 11: lat, lon, sog, cog, dist_to_dest_km, bearing_diff,
-                     sog_hist_mean, sog_hist_std, sog_deviation, voyage_progress, sog_short_avg
+    n_features = 6: lat, lon, sog, cog, dist_to_dest_km, bearing_diff
     """
     dec_len = label_len + pred_len
     
@@ -456,14 +415,16 @@ class VoyageETADataset:
         return (bearing + 360) % 360
     
     def normalize_features(self, features: np.ndarray, fit: bool = False) -> np.ndarray:
-        """Minmax归一化"""
+        """Minmax归一化（带clipping防止测试集超出范围）"""
         if fit:
             self.feature_min = features.min(axis=0)
             self.feature_max = features.max(axis=0)
         
         range_vals = self.feature_max - self.feature_min
         range_vals[range_vals == 0] = 1.0
-        return (features - self.feature_min) / range_vals
+        normalized = (features - self.feature_min) / range_vals
+        # 限制范围，防止测试集极端值导致模型输出爆炸
+        return np.clip(normalized, -0.5, 1.5)
     
     def normalize_target(self, target: np.ndarray, fit: bool = False) -> np.ndarray:
         """Log + 标准化"""
@@ -493,11 +454,9 @@ class VoyageETADataset:
         1. 先统计总序列数，预分配数组
         2. 使用float32减少内存
         3. 分层采样：确保高remaining_hours样本被充分采样
-        4. 航速增强特征：历史均值、标准差、偏差比、航程进度、短期均值
         """
-        # 原始6个特征 + 5个航速增强特征 = 11个特征
-        feature_cols = ['lat', 'lon', 'sog', 'cog', 'dist_to_dest_km', 'bearing_diff',
-                        'sog_hist_mean', 'sog_hist_std', 'sog_deviation', 'voyage_progress', 'sog_short_avg']
+        # 原始6个特征
+        feature_cols = ['lat', 'lon', 'sog', 'cog', 'dist_to_dest_km', 'bearing_diff']
         group_col = 'voyage_id' if 'voyage_id' in voyage_df.columns else 'mmsi'
         
         # 第一遍：统计每个航程可产生的序列数
@@ -721,7 +680,7 @@ class InformerTrainer:
         self.model = model.to(device)
         self.device = device
         self.criterion = nn.HuberLoss(delta=1.0)
-        self.optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
+        self.optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
         self.scheduler_type = scheduler_type
         self.start_epoch = 0
         self.best_val_loss = float('inf')
@@ -1005,18 +964,18 @@ def main():
     parser.add_argument('--processed_dir', type=str, default='./output/processed')
     
     # 模型参数
-    parser.add_argument('--seq_len', type=int, default=96)
-    parser.add_argument('--label_len', type=int, default=48)
+    parser.add_argument('--seq_len', type=int, default=48)
+    parser.add_argument('--label_len', type=int, default=24)
     parser.add_argument('--pred_len', type=int, default=1)
-    parser.add_argument('--d_model', type=int, default=768)
-    parser.add_argument('--n_heads', type=int, default=12)
-    parser.add_argument('--e_layers', type=int, default=4)
-    parser.add_argument('--d_layers', type=int, default=2)
-    parser.add_argument('--d_ff', type=int, default=3072)
-    parser.add_argument('--dropout', type=float, default=0.2)
+    parser.add_argument('--d_model', type=int, default=512)
+    parser.add_argument('--n_heads', type=int, default=8)
+    parser.add_argument('--e_layers', type=int, default=2)
+    parser.add_argument('--d_layers', type=int, default=1)
+    parser.add_argument('--d_ff', type=int, default=2048)
+    parser.add_argument('--dropout', type=float, default=0.05)
     
     # 训练参数
-    parser.add_argument('--batch_size', type=int, default=3072)
+    parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--num_workers', type=int, default=8, help='DataLoader并行加载线程数')
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -1396,9 +1355,8 @@ def main():
             feat_min = None
             feat_max = None
             count, mean, m2 = 0, 0.0, 0.0
-            # 11个特征: 原始6个 + 5个航速增强特征
-            feature_cols = ['lat', 'lon', 'sog', 'cog', 'dist_to_dest_km', 'bearing_diff',
-                            'sog_hist_mean', 'sog_hist_std', 'sog_deviation', 'voyage_progress', 'sog_short_avg']
+            # 6个特征
+            feature_cols = ['lat', 'lon', 'sog', 'cog', 'dist_to_dest_km', 'bearing_diff']
             for bf in bucket_files:
                 df_bucket = pd.read_pickle(bf)
                 df_bucket = df_bucket[df_bucket['voyage_id'].isin(train_ids)]
@@ -1674,9 +1632,8 @@ def main():
     print("Step 4: 训练Informer模型")
     print("="*60)
     
-    # 11个特征: lat, lon, sog, cog, dist_to_dest_km, bearing_diff,
-    #           sog_hist_mean, sog_hist_std, sog_deviation, voyage_progress, sog_short_avg
-    n_features = 11
+    # 6个特征: lat, lon, sog, cog, dist_to_dest_km, bearing_diff
+    n_features = 6
     model = Informer(
         enc_in=n_features, dec_in=n_features, c_out=1,
         seq_len=args.seq_len, label_len=args.label_len, pred_len=args.pred_len,
