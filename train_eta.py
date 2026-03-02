@@ -38,7 +38,7 @@ from collections import deque
 import torch
 import torch.nn as nn
 from torch.optim import Adam, AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, CosineAnnealingWarmRestarts, OneCycleLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, CosineAnnealingWarmRestarts, OneCycleLR, SequentialLR, LinearLR
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 
@@ -674,12 +674,13 @@ class InformerTrainer:
             scheduler_type: 学习率调度器类型
                 - 'plateau': ReduceLROnPlateau (验证损失不下降时降低LR)
                 - 'cosine': CosineAnnealingLR (余弦退火)
+                - 'cosine_warmup': 线性warmup(1 epoch) + CosineAnnealingLR
                 - 'cosine_restart': CosineAnnealingWarmRestarts (带热重启的余弦退火)
                 - 'onecycle': OneCycleLR (一周期策略，自动找最佳LR)
         """
         self.model = model.to(device)
         self.device = device
-        self.criterion = nn.HuberLoss(delta=1.0)
+        self.criterion = nn.SmoothL1Loss(beta=0.5)
         self.optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
         self.scheduler_type = scheduler_type
         self.start_epoch = 0
@@ -690,6 +691,11 @@ class InformerTrainer:
             self.scheduler = ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=3)
         elif scheduler_type == 'cosine':
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=epochs, eta_min=lr * 0.01)
+        elif scheduler_type == 'cosine_warmup':
+            # 线性warmup 1 epoch，然后cosine退火剩余epoch
+            warmup_scheduler = LinearLR(self.optimizer, start_factor=0.1, total_iters=1)
+            cosine_scheduler = CosineAnnealingLR(self.optimizer, T_max=max(1, epochs - 1), eta_min=lr * 0.01)
+            self.scheduler = SequentialLR(self.optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[1])
         elif scheduler_type == 'cosine_restart':
             self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=max(1, epochs // 3), T_mult=2, eta_min=lr * 0.01)
         elif scheduler_type == 'onecycle':
@@ -778,6 +784,8 @@ class InformerTrainer:
             self.scheduler.step(val_loss)
         elif self.scheduler_type == 'onecycle':
             pass  # OneCycleLR在train_epoch中每个batch后更新
+        elif self.scheduler_type in ('cosine', 'cosine_warmup', 'cosine_restart'):
+            self.scheduler.step()
         else:
             self.scheduler.step()
     
@@ -849,9 +857,8 @@ def analyze_bad_cases(y_pred, y_true, X_input, test_meta, dataset, save_dir, thr
     last_step_features = X_input[bad_indices, -1, :]
     raw_features = dataset.inverse_normalize_features(last_step_features)
     
-    # 11个特征: 原始6个 + 5个航速增强特征
-    feature_cols = ['lat', 'lon', 'sog', 'cog', 'dist_to_dest_km', 'bearing_diff',
-                    'sog_hist_mean', 'sog_hist_std', 'sog_deviation', 'voyage_progress', 'sog_short_avg']
+    # 6个特征
+    feature_cols = ['lat', 'lon', 'sog', 'cog', 'dist_to_dest_km', 'bearing_diff']
     
     records = []
     for i, idx in enumerate(bad_indices):
@@ -967,22 +974,22 @@ def main():
     parser.add_argument('--seq_len', type=int, default=48)
     parser.add_argument('--label_len', type=int, default=24)
     parser.add_argument('--pred_len', type=int, default=1)
-    parser.add_argument('--d_model', type=int, default=512)
+    parser.add_argument('--d_model', type=int, default=768)
     parser.add_argument('--n_heads', type=int, default=8)
-    parser.add_argument('--e_layers', type=int, default=2)
-    parser.add_argument('--d_layers', type=int, default=1)
-    parser.add_argument('--d_ff', type=int, default=2048)
-    parser.add_argument('--dropout', type=float, default=0.05)
+    parser.add_argument('--e_layers', type=int, default=3)
+    parser.add_argument('--d_layers', type=int, default=2)
+    parser.add_argument('--d_ff', type=int, default=3072)
+    parser.add_argument('--dropout', type=float, default=0.08)
     
     # 训练参数
     parser.add_argument('--batch_size', type=int, default=4096)
     parser.add_argument('--num_workers', type=int, default=16, help='DataLoader并行加载线程数')
-    parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--lr', type=float, default=4e-4)
-    parser.add_argument('--scheduler', type=str, default='plateau', 
-                        choices=['plateau', 'cosine', 'cosine_restart', 'onecycle'],
-                        help='学习率调度器: plateau(默认), cosine, cosine_restart, onecycle')
-    parser.add_argument('--early_stopping_patience', type=int, default=3,
+    parser.add_argument('--epochs', type=int, default=15)
+    parser.add_argument('--lr', type=float, default=5e-4)
+    parser.add_argument('--scheduler', type=str, default='cosine_warmup', 
+                        choices=['plateau', 'cosine', 'cosine_warmup', 'cosine_restart', 'onecycle'],
+                        help='学习率调度器: plateau, cosine, cosine_warmup(默认,warmup+cosine), cosine_restart, onecycle')
+    parser.add_argument('--early_stopping_patience', type=int, default=5,
                         help='验证损失连续N个epoch未改善则停止训练（0=禁用）')
     parser.add_argument('--resume', action='store_true', help='从checkpoint继续训练')
     
