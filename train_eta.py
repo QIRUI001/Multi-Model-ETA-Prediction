@@ -46,6 +46,52 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from src.informer.model import Informer
 
 
+class AsymmetricHuberLoss(nn.Module):
+    """非对称 Huber 损失函数
+    
+    在标准 HuberLoss 基础上增加两个改进：
+    1. 非对称惩罚：低估(pred < target)时乘以 alpha 倍惩罚
+       - 解决长航程系统性低估问题(710h真实→270h预测)
+    2. 目标值加权：target绝对值越大(=航程越长)，loss权重越高
+       - 让模型更重视长航程的精度
+    
+    工作在标准化log空间中：
+      target > 0 → 航程比均值长
+      target < 0 → 航程比均值短
+      pred < target → 低估（需要更重的惩罚）
+    """
+    def __init__(self, delta: float = 1.0, alpha: float = 1.5, target_weight: float = 0.3):
+        super().__init__()
+        self.delta = delta
+        self.alpha = alpha        # 低估惩罚倍数 (>1 = 惩罚低估更多)
+        self.target_weight = target_weight  # 长航程加权强度 (0=不加权)
+    
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        error = pred - target  # 负值 = 低估
+        abs_error = error.abs()
+        
+        # Huber 损失 (与 nn.HuberLoss 相同的基础)
+        huber = torch.where(
+            abs_error <= self.delta,
+            0.5 * error ** 2,
+            self.delta * (abs_error - 0.5 * self.delta)
+        )
+        
+        # 非对称权重：低估时惩罚更重
+        asym_weight = torch.where(error < 0, self.alpha, 1.0)
+        
+        # 目标值加权：标准化后的target越大(长航程)权重越高
+        # target在标准化log空间，范围大约[-4, 2]，mean=0
+        # 用 softplus 平滑映射到 [1, ~3] 的权重范围
+        if self.target_weight > 0:
+            target_w = 1.0 + self.target_weight * torch.relu(target)  # 只对长航程加权
+        else:
+            target_w = 1.0
+        
+        weighted_loss = asym_weight * target_w * huber
+        return weighted_loss.mean()
+
+
 def _basic_filter_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
     """Step 3: 基础过滤（降低内存/提升质量）"""
     chunk = chunk.dropna()
@@ -679,7 +725,7 @@ class InformerTrainer:
         """
         self.model = model.to(device)
         self.device = device
-        self.criterion = nn.HuberLoss(delta=1.0)
+        self.criterion = AsymmetricHuberLoss(delta=1.0, alpha=1.5, target_weight=0.3)
         self.optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
         self.scheduler_type = scheduler_type
         self.start_epoch = 0
@@ -849,9 +895,8 @@ def analyze_bad_cases(y_pred, y_true, X_input, test_meta, dataset, save_dir, thr
     last_step_features = X_input[bad_indices, -1, :]
     raw_features = dataset.inverse_normalize_features(last_step_features)
     
-    # 11个特征: 原始6个 + 5个航速增强特征
-    feature_cols = ['lat', 'lon', 'sog', 'cog', 'dist_to_dest_km', 'bearing_diff',
-                    'sog_hist_mean', 'sog_hist_std', 'sog_deviation', 'voyage_progress', 'sog_short_avg']
+    # 6个特征
+    feature_cols = ['lat', 'lon', 'sog', 'cog', 'dist_to_dest_km', 'bearing_diff']
     
     records = []
     for i, idx in enumerate(bad_indices):
