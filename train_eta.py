@@ -725,7 +725,7 @@ class InformerTrainer:
         """
         self.model = model.to(device)
         self.device = device
-        self.criterion = AsymmetricHuberLoss(delta=1.0, alpha=1.5, target_weight=0.3)
+        self.criterion = nn.HuberLoss(delta=1.0)
         self.optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
         self.scheduler_type = scheduler_type
         self.start_epoch = 0
