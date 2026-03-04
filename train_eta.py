@@ -987,8 +987,8 @@ def main():
     parser.add_argument('--processed_dir', type=str, default='./output/processed')
     
     # 模型参数
-    parser.add_argument('--seq_len', type=int, default=64)
-    parser.add_argument('--label_len', type=int, default=32)
+    parser.add_argument('--seq_len', type=int, default=48)
+    parser.add_argument('--label_len', type=int, default=24)
     parser.add_argument('--pred_len', type=int, default=1)
     parser.add_argument('--d_model', type=int, default=512)
     parser.add_argument('--n_heads', type=int, default=8)

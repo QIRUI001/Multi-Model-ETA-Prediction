@@ -33,8 +33,8 @@ from train_eta import (
 def main():
     parser = argparse.ArgumentParser(description="从spill桶重建memmap缓存")
     parser.add_argument('--output_dir', type=str, default='./output')
-    parser.add_argument('--seq_len', type=int, default=64)
-    parser.add_argument('--label_len', type=int, default=32)
+    parser.add_argument('--seq_len', type=int, default=48)
+    parser.add_argument('--label_len', type=int, default=24)
     parser.add_argument('--pred_len', type=int, default=1)
     parser.add_argument('--max_voyages', type=int, default=150000)
     parser.add_argument('--max_sequences', type=int, default=75000000)
