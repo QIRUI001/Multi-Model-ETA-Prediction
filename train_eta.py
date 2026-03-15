@@ -721,7 +721,7 @@ def create_data_loaders(X, X_mark_enc, X_mark_dec, y, sailing_days, label_len, p
 class InformerTrainer:
     """Informer模型训练器"""
     
-    def __init__(self, model, device, lr=5e-6, scheduler_type='plateau', epochs=10, steps_per_epoch=None):
+    def __init__(self, model, device, lr=5e-6, scheduler_type='plateau', epochs=10, steps_per_epoch=None, loss_type='huber'):
         """
         Args:
             scheduler_type: 学习率调度器类型
@@ -732,7 +732,10 @@ class InformerTrainer:
         """
         self.model = model.to(device)
         self.device = device
-        self.criterion = nn.HuberLoss(delta=1.0)
+        if loss_type == 'asymmetric':
+            self.criterion = AsymmetricHuberLoss(delta=1.0, alpha=1.5, target_weight=0.3)
+        else:
+            self.criterion = nn.HuberLoss(delta=1.0)
         self.optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
         self.scheduler_type = scheduler_type
         self.start_epoch = 0
@@ -1038,6 +1041,8 @@ def main():
     parser.add_argument('--early_stopping_patience', type=int, default=3,
                         help='验证损失连续N个epoch未改善则停止训练（0=禁用）')
     parser.add_argument('--resume', action='store_true', help='从checkpoint继续训练')
+    parser.add_argument('--loss', type=str, default='huber', choices=['huber', 'asymmetric'],
+                        help='Loss function: huber (standard) or asymmetric (penalize underestimation)')
     
     # 港口模型
     parser.add_argument('--train_port_model', action='store_true', help='训练港口停靠时间模型')
@@ -1712,7 +1717,8 @@ def main():
         model, device, lr=args.lr, 
         scheduler_type=args.scheduler, 
         epochs=args.epochs,
-        steps_per_epoch=steps_per_epoch
+        steps_per_epoch=steps_per_epoch,
+        loss_type=args.loss
     )
     
     model_path = os.path.join(args.output_dir, 'best_informer.pth')
