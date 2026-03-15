@@ -28,7 +28,7 @@ Accurate Estimated Time of Arrival (ETA) prediction for ocean-going vessels is c
 While numerous deep learning architectures have been proposed for time-series forecasting, the relative effectiveness of different model families for vessel ETA prediction remains unclear, as prior studies typically evaluate only one or two architectures.
 In this paper, we present a systematic empirical comparison of ten forecasting models spanning five architectural families---recurrent (LSTM, GRU), convolutional (1D-CNN, TCN), attention-based (Vanilla Transformer, Conv-Transformer, Informer), tree-based (XGBoost), and feedforward (MLP, Ridge)---on a large-scale trans-Pacific AIS dataset comprising 35.9 million position reports and 9,087 voyages.
 All models are evaluated under identical data splits, feature sets, normalization, and training protocols to ensure a fair comparison.
-Our results reveal that XGBoost achieves the best performance (MAE = 15.14\,h), followed closely by neural sequence models, while the Informer---despite its architectural sophistication---does not outperform simpler alternatives.
+Our results reveal that XGBoost achieves the best performance (MAE = 15.14\,h), followed closely by MLP and LSTM, while attention-based models---including the Informer---do not outperform simpler alternatives despite significantly higher parameter counts.
 We further demonstrate that incorporating meteorological features yields a 7.1\% MAE reduction across architectures, and that asymmetric loss functions intended to reduce underestimation degrade overall accuracy.
 These findings suggest that for single-step vessel ETA prediction, feature engineering quality---particularly distance-to-destination---dominates model architecture choice.
 \end{abstract}
@@ -281,18 +281,18 @@ Fig.~\ref{fig:baseline_comparison} provides a visual comparison.
         \textbf{Family} & \textbf{Method} & \textbf{MAE (h)} & \textbf{RMSE (h)} & \textbf{MAPE (\%)} \\
         \midrule
         \multirow{2}{*}{Feedforward} & Ridge & 58.30 & 367.19 & 29.35 \\
-        & MLP & 15.73 & 26.80 & 9.67 \\
+        & MLP & \underline{15.73} & \underline{26.80} & 9.67 \\
         \midrule
-        \multirow{2}{*}{Recurrent} & LSTM & 15.79 & 27.40 & 9.43 \\
+        \multirow{2}{*}{Recurrent} & LSTM & 15.79 & 27.40 & \underline{9.43} \\
         & GRU & 16.03 & 27.28 & 9.62 \\
         \midrule
-        \multirow{2}{*}{Convolutional} & 1D-CNN & -- & -- & -- \\
-        & TCN & -- & -- & -- \\
+        \multirow{2}{*}{Convolutional} & 1D-CNN & 16.08 & 27.53 & 9.90 \\
+        & TCN & 17.19 & 28.13 & 10.95 \\
         \midrule
         Tree & XGBoost & \textbf{15.14} & \textbf{26.05} & \textbf{9.33} \\
         \midrule
-        \multirow{3}{*}{Attention} & Transformer & -- & -- & -- \\
-        & Conv-Trans. & -- & -- & -- \\
+        \multirow{3}{*}{Attention} & Transformer & 18.12 & 29.78 & 10.67 \\
+        & Conv-Trans. & 16.60 & 27.52 & 10.07 \\
         & Informer & 16.20 & 27.26 & 10.53 \\
         \bottomrule
     \end{tabular}
@@ -301,7 +301,7 @@ Fig.~\ref{fig:baseline_comparison} provides a visual comparison.
 \begin{figure}[t]
     \centering
     \includegraphics[width=\columnwidth]{baseline_comparison.pdf}
-    \caption{MAE comparison across all ten methods, grouped by architectural family. Ridge Regression (58.30\,h) is omitted for visual clarity. The dashed line indicates the best result (XGBoost, 15.14\,h).}
+    \caption{MAE comparison across all ten methods, grouped by architectural family. Ridge Regression (58.30\,h) is omitted for visual clarity. The dashed line indicates the best result (XGBoost, 15.14\,h). Attention-based models (Transformer, Conv-Trans., Informer) consistently underperform simpler alternatives.}
     \label{fig:baseline_comparison}
 \end{figure}
 
@@ -312,16 +312,18 @@ XGBoost achieves the lowest MAE (15.14\,h), RMSE (26.05\,h), and MAPE (9.33\%), 
 This result aligns with recent findings in time-series forecasting~\cite{zeng2023transformers} that simpler models can rival or surpass attention-based architectures, particularly when strong engineered features are available.
 
 \paragraph{Finding 2: Feature engineering dominates architecture choice.}
-Excluding Ridge, all models achieve MAEs within a narrow 15--17\,h range (${<}15\%$ relative spread), despite spanning five distinct architectural families and parameter counts from 270K to 11.3M.
+Excluding Ridge, all models achieve MAEs within a 15.14--18.12\,h range.
+The top five models (XGBoost, MLP, LSTM, GRU, 1D-CNN) cluster within 15.14--16.08\,h (${<}7\%$ relative spread), despite spanning four distinct architectural families and parameter counts from 270K to 11.3M.
 The highly predictive \textit{distance-to-destination} feature provides a strong prior on remaining time, reducing the marginal benefit of sophisticated temporal modeling.
 
-\paragraph{Finding 3: The Informer does not benefit from its complexity.}
-The Informer (11.3M parameters) achieves a higher MAE than simpler models with 7--40$\times$ fewer parameters.
-Its ProbSparse attention and encoder distilling mechanisms, designed for long-horizon multi-step forecasting, may be unnecessary for the single-step prediction task considered here ($L_{\text{pred}} = 1$).
+\paragraph{Finding 3: Attention-based models do not justify their complexity.}
+The Vanilla Transformer (18.12\,h MAE, 1.6M params) performs worst among the neural models.
+The Informer (16.20\,h, 11.3M params) and Conv-Transformer (16.60\,h, 1.2M params) fare better but still lag behind the simpler MLP (15.73\,h, 270K params).
+These architectures, designed for long-horizon multi-step forecasting, appear unnecessary for the single-step prediction task considered here ($L_{\text{pred}} = 1$).
 
-\paragraph{Finding 4: Neural sequence models perform comparably.}
-LSTM, GRU, MLP, and the attention-based models all cluster within a narrow performance band.
-No single neural architecture family demonstrates a clear advantage over others, suggesting that the bottleneck lies in feature informativeness rather than temporal modeling capability.
+\paragraph{Finding 4: Convolutional models show mixed results.}
+The 1D-CNN (16.08\,h) approaches the MLP and recurrent models, but the TCN (17.19\,h) underperforms, possibly due to overfitting with its dilated convolutions on a relatively short 48-step input.
+The TCN's exponentially growing receptive field may be more beneficial for longer sequences than the ones considered here.
 
 
 \subsection{Ablation Studies}
@@ -439,7 +441,7 @@ Second, incorporating meteorological features yields a consistent 7.1\% MAE impr
 
 Third, asymmetric loss functions intended to reduce underestimation significantly degrade overall accuracy (up to 17.6\% MAE increase), cautioning against their naive application in this setting.
 
-Finally, the narrow performance spread among neural models (15.73--16.20\,h MAE) suggests that the bottleneck in vessel ETA prediction lies in feature informativeness and data quality rather than model architecture.
+Finally, the narrow performance spread among the top neural models (15.73--16.20\,h MAE for MLP, LSTM, GRU, CNN, and Informer) suggests that the bottleneck in vessel ETA prediction lies in feature informativeness and data quality rather than model architecture.
 These findings provide practical guidance for maritime stakeholders seeking to deploy ETA prediction systems.
 
 Future work will explore ocean current data integration, multi-step prediction horizons (where attention mechanisms may provide greater benefit), and extending the evaluation to global shipping routes beyond the trans-Pacific corridor.

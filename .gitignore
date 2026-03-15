@@ -16,4 +16,5 @@ tmp
 *.toc
 *.lof
 *.pdf
+*.synctex.gz
 .overleaf
