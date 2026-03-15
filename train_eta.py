@@ -721,7 +721,7 @@ def create_data_loaders(X, X_mark_enc, X_mark_dec, y, sailing_days, label_len, p
 class InformerTrainer:
     """Informer模型训练器"""
     
-    def __init__(self, model, device, lr=5e-6, scheduler_type='plateau', epochs=10, steps_per_epoch=None, loss_type='huber'):
+    def __init__(self, model, device, lr=5e-6, scheduler_type='plateau', epochs=10, steps_per_epoch=None, loss_type='huber', loss_alpha=1.5, loss_target_weight=0.3):
         """
         Args:
             scheduler_type: 学习率调度器类型
@@ -733,9 +733,12 @@ class InformerTrainer:
         self.model = model.to(device)
         self.device = device
         if loss_type == 'asymmetric':
-            self.criterion = AsymmetricHuberLoss(delta=1.0, alpha=1.5, target_weight=0.3)
+            self.criterion = AsymmetricHuberLoss(delta=1.0, alpha=loss_alpha, target_weight=loss_target_weight)
+            print(f'使用非对称损失: alpha={loss_alpha}, target_weight={loss_target_weight}')
         else:
             self.criterion = nn.HuberLoss(delta=1.0)
+        # Validation always uses standard Huber for fair early stopping
+        self.val_criterion = nn.HuberLoss(delta=1.0)
         self.optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
         self.scheduler_type = scheduler_type
         self.start_epoch = 0
@@ -801,7 +804,7 @@ class InformerTrainer:
                 
                 output = self.model(x_enc, x_mark_enc, x_dec, x_mark_dec)
                 output = output.squeeze(-1).squeeze(-1)
-                loss = self.criterion(output, y)
+                loss = self.val_criterion(output, y)
                 total_loss += loss.item()
         
         return total_loss / len(loader)
@@ -1043,6 +1046,10 @@ def main():
     parser.add_argument('--resume', action='store_true', help='从checkpoint继续训练')
     parser.add_argument('--loss', type=str, default='huber', choices=['huber', 'asymmetric'],
                         help='Loss function: huber (standard) or asymmetric (penalize underestimation)')
+    parser.add_argument('--loss_alpha', type=float, default=1.5,
+                        help='Asymmetric loss: underestimation penalty multiplier (default: 1.5)')
+    parser.add_argument('--loss_target_weight', type=float, default=0.3,
+                        help='Asymmetric loss: long-voyage weighting strength (0=disabled, default: 0.3)')
     
     # 港口模型
     parser.add_argument('--train_port_model', action='store_true', help='训练港口停靠时间模型')
@@ -1718,7 +1725,9 @@ def main():
         scheduler_type=args.scheduler, 
         epochs=args.epochs,
         steps_per_epoch=steps_per_epoch,
-        loss_type=args.loss
+        loss_type=args.loss,
+        loss_alpha=args.loss_alpha,
+        loss_target_weight=args.loss_target_weight
     )
     
     model_path = os.path.join(args.output_dir, 'best_informer.pth')
