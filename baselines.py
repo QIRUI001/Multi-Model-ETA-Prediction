@@ -237,8 +237,8 @@ def run_xgboost(X_train, y_train, X_val, y_val, X_test, y_test):
         'subsample': 0.8,
         'colsample_bytree': 0.8,
         'min_child_weight': 5,
-        'tree_method': 'gpu_hist',
-        'device': 'cuda',
+        'tree_method': 'hist',
+        'device': 'cpu',
         'eval_metric': 'mae',
     }
 
