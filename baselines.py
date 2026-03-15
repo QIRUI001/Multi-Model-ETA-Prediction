@@ -8,6 +8,10 @@ Models:
 3. MLP (Feedforward)
 4. XGBoost (gradient boosting on hand-crafted features)
 5. Linear Regression (simplest baseline)
+6. Vanilla Transformer (encoder-only)
+7. TCN (Temporal Convolutional Network)
+8. ConvTransformer (CNN + Transformer hybrid)
+9. CNN-1D (pure convolutional)
 
 All baselines use the same preprocessed data as the Informer model
 (loaded from cached memmap arrays).
@@ -129,6 +133,141 @@ class MLPModel(nn.Module):
 
     def forward(self, x):
         return self.net(x.reshape(x.size(0), -1)).squeeze(-1)
+
+
+class TransformerModel(nn.Module):
+    """Vanilla Transformer encoder for sequence-to-one regression."""
+    def __init__(self, input_dim, seq_len=48, d_model=256, nhead=8, num_layers=3, d_ff=512, dropout=0.1):
+        super().__init__()
+        self.input_proj = nn.Linear(input_dim, d_model)
+        self.pos_embed = nn.Parameter(torch.randn(1, seq_len, d_model) * 0.02)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dim_feedforward=d_ff,
+            dropout=dropout, batch_first=True, activation='gelu'
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.fc = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, 1)
+        )
+
+    def forward(self, x):
+        # x: (batch, seq_len, features)
+        x = self.input_proj(x) + self.pos_embed[:, :x.size(1), :]
+        x = self.encoder(x)
+        # Global average pooling over sequence
+        x = x.mean(dim=1)
+        return self.fc(x).squeeze(-1)
+
+
+class TCNBlock(nn.Module):
+    """Single TCN residual block with dilated causal convolution."""
+    def __init__(self, in_channels, out_channels, kernel_size, dilation, dropout=0.1):
+        super().__init__()
+        padding = (kernel_size - 1) * dilation
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size,
+                               padding=padding, dilation=dilation)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size,
+                               padding=padding, dilation=dilation)
+        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.bn2 = nn.BatchNorm1d(out_channels)
+        self.dropout = nn.Dropout(dropout)
+        self.downsample = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
+
+    def forward(self, x):
+        # x: (batch, channels, seq_len)
+        residual = self.downsample(x)
+        out = self.dropout(torch.relu(self.bn1(self.conv1(x)[:, :, :x.size(2)])))
+        out = self.dropout(torch.relu(self.bn2(self.conv2(out)[:, :, :x.size(2)])))
+        return torch.relu(out + residual)
+
+
+class TCNModel(nn.Module):
+    """Temporal Convolutional Network for sequence-to-one regression."""
+    def __init__(self, input_dim, num_channels=None, kernel_size=3, dropout=0.1):
+        super().__init__()
+        if num_channels is None:
+            num_channels = [128, 128, 256, 256]
+        layers = []
+        in_ch = input_dim
+        for i, out_ch in enumerate(num_channels):
+            dilation = 2 ** i
+            layers.append(TCNBlock(in_ch, out_ch, kernel_size, dilation, dropout))
+            in_ch = out_ch
+        self.network = nn.Sequential(*layers)
+        self.fc = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(num_channels[-1], 1)
+        )
+
+    def forward(self, x):
+        # x: (batch, seq_len, features) -> (batch, features, seq_len)
+        x = x.transpose(1, 2)
+        x = self.network(x)
+        return self.fc(x).squeeze(-1)
+
+
+class ConvTransformerModel(nn.Module):
+    """CNN feature extractor + Transformer encoder hybrid."""
+    def __init__(self, input_dim, seq_len=48, d_model=256, nhead=8, num_layers=2, dropout=0.1):
+        super().__init__()
+        # Conv feature extractor
+        self.conv = nn.Sequential(
+            nn.Conv1d(input_dim, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.GELU(),
+            nn.Conv1d(128, d_model, kernel_size=3, padding=1),
+            nn.BatchNorm1d(d_model),
+            nn.GELU(),
+        )
+        self.pos_embed = nn.Parameter(torch.randn(1, seq_len, d_model) * 0.02)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dim_feedforward=d_model * 2,
+            dropout=dropout, batch_first=True, activation='gelu'
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.fc = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, 1)
+        )
+
+    def forward(self, x):
+        # x: (batch, seq_len, features)
+        x = x.transpose(1, 2)  # (batch, features, seq_len)
+        x = self.conv(x)       # (batch, d_model, seq_len)
+        x = x.transpose(1, 2)  # (batch, seq_len, d_model)
+        x = x + self.pos_embed[:, :x.size(1), :]
+        x = self.encoder(x)
+        x = x.mean(dim=1)
+        return self.fc(x).squeeze(-1)
+
+
+class CNN1DModel(nn.Module):
+    """1D CNN for sequence-to-one regression."""
+    def __init__(self, input_dim, seq_len=48):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv1d(input_dim, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128), nn.ReLU(),
+            nn.Conv1d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm1d(256), nn.ReLU(),
+            nn.MaxPool1d(2),
+            nn.Conv1d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm1d(256), nn.ReLU(),
+            nn.AdaptiveAvgPool1d(4),
+        )
+        self.fc = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(256 * 4, 256),
+            nn.ReLU(), nn.Dropout(0.1),
+            nn.Linear(256, 1)
+        )
+
+    def forward(self, x):
+        x = x.transpose(1, 2)
+        x = self.conv(x)
+        return self.fc(x).squeeze(-1)
 
 
 # ============================================================
@@ -305,7 +444,7 @@ def main():
     seq_len = X_train.shape[1]
     n_features = X_train.shape[2]
 
-    models_to_run = args.models.split(',') if args.models != 'all' else ['lstm', 'gru', 'mlp', 'xgboost', 'linear']
+    models_to_run = args.models.split(',') if args.models != 'all' else ['lstm', 'gru', 'mlp', 'xgboost', 'linear', 'transformer', 'tcn', 'convtransformer', 'cnn1d']
 
     # Create simple dataloaders (sequence features + target only)
     train_ds = TensorDataset(torch.FloatTensor(np.array(X_train)), torch.FloatTensor(np.array(y_train)))
@@ -395,6 +534,74 @@ def main():
         metrics = calculate_metrics(y_pred, y_true)
         results['Linear'] = metrics
         print(f"  Linear Results: MAE={metrics['MAE_hours']:.2f}h, RMSE={metrics['RMSE']:.2f}h, MAPE={metrics['MAPE']:.2f}%")
+
+    # ---- Vanilla Transformer ----
+    if 'transformer' in models_to_run:
+        print("\n" + "="*50)
+        print("Training Transformer baseline...")
+        print("="*50)
+        transformer = TransformerModel(n_features, seq_len=seq_len, d_model=256, nhead=8, num_layers=3, d_ff=512, dropout=0.1)
+        print(f"  Parameters: {sum(p.numel() for p in transformer.parameters()):,}")
+        transformer = train_model(transformer, train_loader, val_loader, device, epochs=args.epochs, lr=args.lr, patience=args.patience, model_name="Transformer")
+        y_pred_norm = predict_model(transformer, test_loader, device)
+        y_pred = inverse_normalize_target(y_pred_norm, target_mean, target_std)
+        y_true = inverse_normalize_target(np.array(y_test), target_mean, target_std)
+        y_pred = np.maximum(y_pred, 0)
+        metrics = calculate_metrics(y_pred, y_true)
+        results['Transformer'] = metrics
+        print(f"  Transformer Results: MAE={metrics['MAE_hours']:.2f}h, RMSE={metrics['RMSE']:.2f}h, MAPE={metrics['MAPE']:.2f}%")
+        del transformer; gc.collect(); torch.cuda.empty_cache()
+
+    # ---- TCN ----
+    if 'tcn' in models_to_run:
+        print("\n" + "="*50)
+        print("Training TCN baseline...")
+        print("="*50)
+        tcn = TCNModel(n_features, num_channels=[128, 128, 256, 256], kernel_size=3, dropout=0.1)
+        print(f"  Parameters: {sum(p.numel() for p in tcn.parameters()):,}")
+        tcn = train_model(tcn, train_loader, val_loader, device, epochs=args.epochs, lr=args.lr, patience=args.patience, model_name="TCN")
+        y_pred_norm = predict_model(tcn, test_loader, device)
+        y_pred = inverse_normalize_target(y_pred_norm, target_mean, target_std)
+        y_true = inverse_normalize_target(np.array(y_test), target_mean, target_std)
+        y_pred = np.maximum(y_pred, 0)
+        metrics = calculate_metrics(y_pred, y_true)
+        results['TCN'] = metrics
+        print(f"  TCN Results: MAE={metrics['MAE_hours']:.2f}h, RMSE={metrics['RMSE']:.2f}h, MAPE={metrics['MAPE']:.2f}%")
+        del tcn; gc.collect(); torch.cuda.empty_cache()
+
+    # ---- ConvTransformer ----
+    if 'convtransformer' in models_to_run:
+        print("\n" + "="*50)
+        print("Training ConvTransformer baseline...")
+        print("="*50)
+        convtf = ConvTransformerModel(n_features, seq_len=seq_len, d_model=256, nhead=8, num_layers=2, dropout=0.1)
+        print(f"  Parameters: {sum(p.numel() for p in convtf.parameters()):,}")
+        convtf = train_model(convtf, train_loader, val_loader, device, epochs=args.epochs, lr=args.lr, patience=args.patience, model_name="ConvTransformer")
+        y_pred_norm = predict_model(convtf, test_loader, device)
+        y_pred = inverse_normalize_target(y_pred_norm, target_mean, target_std)
+        y_true = inverse_normalize_target(np.array(y_test), target_mean, target_std)
+        y_pred = np.maximum(y_pred, 0)
+        metrics = calculate_metrics(y_pred, y_true)
+        results['ConvTransformer'] = metrics
+        print(f"  ConvTransformer Results: MAE={metrics['MAE_hours']:.2f}h, RMSE={metrics['RMSE']:.2f}h, MAPE={metrics['MAPE']:.2f}%")
+        del convtf; gc.collect(); torch.cuda.empty_cache()
+
+    # ---- CNN-1D ----
+    if 'cnn1d' in models_to_run:
+        print("\n" + "="*50)
+        print("Training CNN-1D baseline...")
+        print("="*50)
+        cnn = CNN1DModel(n_features, seq_len=seq_len)
+        print(f"  Parameters: {sum(p.numel() for p in cnn.parameters()):,}")
+        cnn = train_model(cnn, train_loader, val_loader, device, epochs=args.epochs, lr=args.lr, patience=args.patience, model_name="CNN-1D")
+        y_pred_norm = predict_model(cnn, test_loader, device)
+        y_pred = inverse_normalize_target(y_pred_norm, target_mean, target_std)
+        y_true = inverse_normalize_target(np.array(y_test), target_mean, target_std)
+        y_pred = np.maximum(y_pred, 0)
+        metrics = calculate_metrics(y_pred, y_true)
+        results['CNN-1D'] = metrics
+        print(f"  CNN-1D Results: MAE={metrics['MAE_hours']:.2f}h, RMSE={metrics['RMSE']:.2f}h, MAPE={metrics['MAPE']:.2f}%")
+        del cnn; gc.collect(); torch.cuda.empty_cache()
 
     # ===== Summary =====
     print("\n" + "="*60)
