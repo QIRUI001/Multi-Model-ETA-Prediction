@@ -231,7 +231,7 @@ def run_xgboost(X_train, y_train, X_val, y_val, X_test, y_test):
     dtest = xgb.DMatrix(X_te_feat)
 
     params = {
-        'objective': 'reg:pseudohuber',
+        'objective': 'reg:squarederror',
         'max_depth': 8,
         'learning_rate': 0.1,
         'subsample': 0.8,
