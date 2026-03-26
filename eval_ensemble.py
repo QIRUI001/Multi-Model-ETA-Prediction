@@ -8,7 +8,17 @@ from pathlib import Path
 
 def main():
     ensemble_dir = Path('output/ensemble')
-    seeds = [42, 43, 44, 45, 46]
+
+    # Auto-detect all trained seeds
+    seed_dirs = sorted(ensemble_dir.glob('seed*'))
+    seeds = []
+    for d in seed_dirs:
+        pred_path = d / 'predictions.npz'
+        if pred_path.exists():
+            seeds.append(int(d.name.replace('seed', '')))
+    if not seeds:
+        print("No trained models found in output/ensemble/seed*/predictions.npz")
+        sys.exit(1)
 
     y_true = None
     preds = []
