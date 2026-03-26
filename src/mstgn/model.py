@@ -415,3 +415,149 @@ class HybridNoGraph(nn.Module):
 
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class ResidualBlock(nn.Module):
+    """Pre-norm residual block: LN → Linear → SiLU → Drop → Linear + skip."""
+
+    def __init__(self, dim, dropout=0.15):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim, dim),
+        )
+        self.activation = nn.SiLU()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.dropout(self.activation(x + self.net(x)))
+
+
+class MSTGN_V2(nn.Module):
+    """Enhanced MSTGN: rich statistical features + residual MLP + stronger GCN.
+
+    Improvements over MSTGN_MLP:
+    1. Rich features: 9 aggregations (last, first, mean, std, diff, min, max,
+       recent_mean, recent_std) + explicit cross-features
+    2. 3-layer GCN with residual connections, wider embeddings
+    3. 3 cell contexts: current, origin, route-mean
+    4. Residual MLP blocks with LayerNorm + SiLU
+    """
+
+    def __init__(self, adj_matrix, init_node_features,
+                 seq_feat_dim=11, seq_len=48,
+                 gcn_hidden=128, cell_emb_dim=64,
+                 hidden_dim=512, num_blocks=3,
+                 dropout=0.15):
+        super().__init__()
+
+        node_feat_dim = init_node_features.shape[1]
+
+        # === Graph branch: 3-layer GCN with residual ===
+        self.register_buffer('adj', torch.from_numpy(adj_matrix).float())
+        self.node_features = nn.Parameter(
+            torch.from_numpy(init_node_features).float()
+        )
+        self.gcn1 = GCNLayer(node_feat_dim, gcn_hidden)
+        self.gcn2 = GCNLayer(gcn_hidden, gcn_hidden)
+        self.gcn3 = GCNLayer(gcn_hidden, cell_emb_dim)
+        self.gcn_drop = nn.Dropout(dropout)
+
+        # Feature dimensions:
+        #   9 aggregations × 11 features = 99
+        #   + 4 cross features
+        #   + 3 × cell_emb_dim graph context
+        stat_dim = seq_feat_dim * 9 + 4
+        total_dim = stat_dim + cell_emb_dim * 3
+
+        # === Residual MLP ===
+        self.input_proj = nn.Sequential(
+            nn.Linear(total_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(dropout)
+        )
+        self.res_blocks = nn.ModuleList([
+            ResidualBlock(hidden_dim, dropout) for _ in range(num_blocks)
+        ])
+        self.output_head = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim // 4),
+            nn.SiLU(),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(hidden_dim // 4, 1)
+        )
+
+        self._init_weights()
+
+    def _init_weights(self):
+        gcn_linears = {self.gcn1.linear, self.gcn2.linear, self.gcn3.linear}
+        for m in self.modules():
+            if isinstance(m, nn.Linear) and m not in gcn_linears:
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def _extract_features(self, x):
+        """Extract rich statistical features from sequence.
+
+        x: (batch, 48, 11)
+        Returns: (batch, 99 + 4) = (batch, 103)
+        """
+        last = x[:, -1, :]           # (B, 11)
+        first = x[:, 0, :]           # (B, 11)
+        mean = x.mean(dim=1)         # (B, 11)
+        std = x.std(dim=1)           # (B, 11)
+        diff = last - first           # (B, 11)
+        xmin = x.min(dim=1).values   # (B, 11)
+        xmax = x.max(dim=1).values   # (B, 11)
+
+        # Recent window (last 12 steps)
+        recent = x[:, -12:, :]
+        recent_mean = recent.mean(dim=1)  # (B, 11)
+        recent_std = recent.std(dim=1)    # (B, 11)
+
+        # Cross features (indices: sog=2, dist=4, bearing_diff=5)
+        sog_last = last[:, 2:3]
+        dist_last = last[:, 4:5]
+        bearing_last = last[:, 5:6]
+        sog_x_dist = sog_last * dist_last
+        dist_sq = dist_last * dist_last
+        sog_x_bearing = sog_last * bearing_last
+        sog_accel_x_dist = diff[:, 2:3] * dist_last
+
+        return torch.cat([last, first, mean, std, diff, xmin, xmax,
+                          recent_mean, recent_std,
+                          sog_x_dist, dist_sq, sog_x_bearing,
+                          sog_accel_x_dist], dim=-1)
+
+    def forward(self, x, cell_ids):
+        # Graph: 3-layer GCN with residual between layers 1 and 2
+        h1 = self.gcn1(self.node_features, self.adj)
+        h1 = self.gcn_drop(h1)
+        h2 = self.gcn2(h1, self.adj) + h1  # residual
+        h2 = self.gcn_drop(h2)
+        cell_emb = self.gcn3(h2, self.adj)  # (N, cell_emb_dim)
+
+        # Rich statistical features
+        stats = self._extract_features(x)
+
+        # 3 graph contexts: current position, origin, route average
+        current_cell = cell_emb[cell_ids[:, -1]]
+        origin_cell = cell_emb[cell_ids[:, 0]]
+        route_mean = cell_emb[cell_ids].mean(dim=1)
+
+        combined = torch.cat([stats, current_cell, origin_cell, route_mean],
+                             dim=-1)
+
+        # Residual MLP
+        h = self.input_proj(combined)
+        for block in self.res_blocks:
+            h = block(h)
+        return self.output_head(h).squeeze(-1)
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)

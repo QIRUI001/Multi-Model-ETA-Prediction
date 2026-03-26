@@ -31,7 +31,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-from src.mstgn.model import MSTGN, MSTGN_LateFusion, MSTGN_MLP, StatMLP, MSTGN_Hybrid, HybridNoGraph
+from src.mstgn.model import MSTGN, MSTGN_LateFusion, MSTGN_MLP, StatMLP, MSTGN_Hybrid, HybridNoGraph, MSTGN_V2
 
 
 # ============================================================
@@ -141,8 +141,13 @@ def main():
     parser.add_argument('--gru_layers', type=int, default=2)
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--variant', type=str, default='gru',
-                        choices=['gru', 'late_fusion', 'mlp', 'stat_mlp', 'hybrid', 'hybrid_no_graph'],
+                        choices=['gru', 'late_fusion', 'mlp', 'stat_mlp', 'hybrid', 'hybrid_no_graph', 'v2'],
                         help='Model variant')
+    parser.add_argument('--hidden_dim', type=int, default=512)
+    parser.add_argument('--num_blocks', type=int, default=3)
+    parser.add_argument('--scheduler', type=str, default='plateau',
+                        choices=['plateau', 'cosine'],
+                        help='LR scheduler type')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -197,11 +202,12 @@ def main():
     model_cls = {
         'gru': MSTGN, 'late_fusion': MSTGN_LateFusion,
         'mlp': MSTGN_MLP, 'stat_mlp': StatMLP,
-        'hybrid': MSTGN_Hybrid, 'hybrid_no_graph': HybridNoGraph
+        'hybrid': MSTGN_Hybrid, 'hybrid_no_graph': HybridNoGraph,
+        'v2': MSTGN_V2,
     }[args.variant]
 
     no_graph_variants = {'stat_mlp', 'hybrid_no_graph'}
-    no_gru_variants = {'mlp', 'stat_mlp'}
+    no_gru_variants = {'mlp', 'stat_mlp', 'v2'}
 
     if args.variant in no_graph_variants:
         model_kwargs = dict(
@@ -210,6 +216,18 @@ def main():
         )
         if args.variant not in no_gru_variants:
             model_kwargs.update(gru_hidden=args.gru_hidden, gru_layers=args.gru_layers)
+    elif args.variant == 'v2':
+        model_kwargs = dict(
+            adj_matrix=adj,
+            init_node_features=node_features,
+            seq_feat_dim=train_ds.X.shape[-1],
+            seq_len=train_ds.X.shape[1],
+            gcn_hidden=args.gcn_hidden,
+            cell_emb_dim=args.cell_emb_dim,
+            hidden_dim=args.hidden_dim,
+            num_blocks=args.num_blocks,
+            dropout=args.dropout,
+        )
     else:
         model_kwargs = dict(
             adj_matrix=adj,
@@ -229,7 +247,13 @@ def main():
 
     # ---- Training ----
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1)
+    if args.scheduler == 'cosine':
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+        use_cosine = True
+    else:
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1)
+        use_cosine = False
     criterion = nn.HuberLoss(delta=1.0)
 
     best_val = float('inf')
@@ -246,7 +270,10 @@ def main():
                                      device, epoch, args.epochs)
         val_loss, _, _ = evaluate(model, val_loader, criterion, device)
 
-        scheduler.step(val_loss)
+        if use_cosine:
+            scheduler.step()
+        else:
+            scheduler.step(val_loss)
         lr_now = optimizer.param_groups[0]['lr']
         train_losses.append(train_loss)
         val_losses.append(val_loss)
