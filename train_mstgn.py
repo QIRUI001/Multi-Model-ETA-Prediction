@@ -322,10 +322,14 @@ def main():
     print(f"{'='*60}")
 
     if swa_model is not None:
-        # Update SWA batch norm statistics
+        # Manual BN update for SWA (update_bn doesn't handle multi-input DataLoaders)
         print("  Updating SWA batch norm statistics...")
-        from torch.optim.swa_utils import update_bn
-        update_bn(train_loader, swa_model, device=device)
+        swa_model.train()
+        with torch.no_grad():
+            for x, cell_ids, y in tqdm(train_loader, desc='SWA BN', leave=False):
+                x, cell_ids = x.to(device), cell_ids.to(device)
+                swa_model(x, cell_ids)
+        swa_model.eval()
         _, y_pred_norm, y_true_norm = evaluate(swa_model, test_loader, criterion, device)
         # Also evaluate non-SWA best for comparison
         model.load_state_dict(best_state)
