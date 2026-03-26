@@ -31,7 +31,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-from src.mstgn.model import MSTGN
+from src.mstgn.model import MSTGN, MSTGN_LateFusion, MSTGN_MLP
 
 
 # ============================================================
@@ -140,6 +140,9 @@ def main():
     parser.add_argument('--gru_hidden', type=int, default=256)
     parser.add_argument('--gru_layers', type=int, default=2)
     parser.add_argument('--dropout', type=float, default=0.1)
+    parser.add_argument('--variant', type=str, default='gru',
+                        choices=['gru', 'late_fusion', 'mlp'],
+                        help='Model variant: gru (concat), late_fusion, mlp')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -191,19 +194,22 @@ def main():
     print(f"Sequence features: {train_ds.X.shape[-1]}, sequence length: {train_ds.X.shape[1]}")
 
     # ---- Create model ----
-    model = MSTGN(
+    model_cls = {'gru': MSTGN, 'late_fusion': MSTGN_LateFusion, 'mlp': MSTGN_MLP}[args.variant]
+    model_kwargs = dict(
         adj_matrix=adj,
         init_node_features=node_features,
         seq_feat_dim=train_ds.X.shape[-1],
         seq_len=train_ds.X.shape[1],
         gcn_hidden=args.gcn_hidden,
         cell_emb_dim=args.cell_emb_dim,
-        gru_hidden=args.gru_hidden,
-        gru_layers=args.gru_layers,
         dropout=args.dropout,
-    ).to(device)
+    )
+    if args.variant != 'mlp':
+        model_kwargs.update(gru_hidden=args.gru_hidden, gru_layers=args.gru_layers)
+    model = model_cls(**model_kwargs).to(device)
 
-    print(f"MSTGN parameters: {model.count_parameters():,}")
+    variant_name = f"MSTGN-{args.variant}"
+    print(f"{variant_name} parameters: {model.count_parameters():,}")
 
     # ---- Training ----
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -216,7 +222,7 @@ def main():
     train_losses, val_losses = [], []
 
     print(f"\n{'='*60}")
-    print(f"Training MSTGN for {args.epochs} epochs")
+    print(f"Training {variant_name} for {args.epochs} epochs")
     print(f"{'='*60}")
 
     for epoch in range(args.epochs):
@@ -261,14 +267,14 @@ def main():
     y_pred = np.maximum(y_pred, 0)
 
     metrics = calculate_metrics(y_pred, y_true)
-    print(f"\nMSTGN Test Results:")
+    print(f"\n{variant_name} Test Results:")
     print(f"  MAE:  {metrics['MAE_hours']:.2f} hours ({metrics['MAE_days']:.2f} days)")
     print(f"  RMSE: {metrics['RMSE']:.2f} hours")
     print(f"  MAPE: {metrics['MAPE']:.2f}%")
 
     # Save results
     results = {
-        'model': 'MSTGN',
+        'model': variant_name,
         'metrics': {k: float(v) for k, v in metrics.items()},
         'args': vars(args),
         'graph_meta': graph_meta,
@@ -286,10 +292,10 @@ def main():
     ax.plot(range(1, len(val_losses)+1), val_losses, label='Val', marker='s')
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Huber Loss')
-    ax.set_title('MSTGN Training Curve')
+    ax.set_title(f'{variant_name} Training Curve')
     ax.legend()
     ax.grid(True, alpha=0.3)
-    fig.savefig(Path(args.output_dir) / 'training_curve.png', dpi=150, bbox_inches='tight')
+    fig.savefig(Path(args.output_dir) / f'training_curve_{args.variant}.png', dpi=150, bbox_inches='tight')
     plt.close(fig)
 
     # Save predictions for analysis
@@ -298,7 +304,7 @@ def main():
              y_pred_norm=y_pred_norm, y_true_norm=y_true_norm)
 
     # Discord notification
-    msg = (f"🚢 MSTGN Training Complete!\n"
+    msg = (f"🚢 {variant_name} Training Complete!\n"
            f"MAE: {metrics['MAE_hours']:.2f}h | "
            f"RMSE: {metrics['RMSE']:.2f}h | "
            f"MAPE: {metrics['MAPE']:.2f}%\n"

@@ -7,10 +7,13 @@
 \usepackage{textcomp}
 \usepackage{booktabs}
 \usepackage{multirow}
-\usepackage{hyperref}
 \usepackage{xcolor}
 \usepackage{subcaption}
 \usepackage{array}
+\usepackage[numbers]{natbib}
+\usepackage[colorlinks=true, allcolors=blue]{hyperref}
+\usepackage{ragged2e}
+\newcolumntype{P}[1]{>{\RaggedRight\arraybackslash}p{#1}}
 
 \title{An Empirical Comparison of Deep Learning Architectures for Vessel ETA Prediction on Trans-Pacific Routes}
 
@@ -61,6 +64,50 @@ Our main contributions are:
     \item An investigation of asymmetric loss functions for reducing ETA underestimation, yielding a negative result that cautions against naive application of such losses.
     \item A decoupled prediction architecture that separately models sailing time and port-dwell time, reflecting their distinct underlying dynamics.
 \end{enumerate}
+
+\section{Related Works}
+Numerous studies have addressed the issue of vessel arrival uncertainty during voyages by predicting vessel ETA to assist operators in making informed decisions ~\citep{yuShipArrivalPrediction2018,chuVesselArrivalTime2025,duSegmentedETAPrediction2025,nomanReviewVesselTime2025}. AIS data provides diverse information on vessel voyages, encompassing static details (e.g., size, name and IMO number), dynamic attributes (e.g., location and heading), and voyage-specific information (e.g., destination and draft). These AIS data can be generated and transmitted at intervals that range from a few seconds to several minutes, providing an extensive and dynamic dataset of vessel movements \citep{yangHarnessingPowerMachine2024, chuEvaluationPredictionPunctuality2023}. These studies can be broadly categorized into two methodological branches: path/trajectory-based methods, machine learning and feature-engineering-based methods\citep{leiPredictingVesselArrival2024}. Each branch offers distinct perspectives on how to model ETA prediction, with varying assumptions about the importance of route structure, feature interactions, and temporal dynamics. In Table 1, we summarize recent studies on VAT prediction, and in the following subsections, we review representative studies from each category to highlight their approaches and findings.
+\begin{table*}[htbp]
+\centering
+\caption{Summary of related literature.}
+\label{tab:related_literature}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.15}
+
+\begin{tabular}{P{2.3cm} P{2.0cm} P{2.2cm} P{2.2cm} P{1.5cm} P{3.6cm}}
+\toprule
+\textbf{Article} & \textbf{Scenario category} & \textbf{Compared models} & \textbf{Data source} & \textbf{Best model} & \textbf{Characteristic} \\
+\midrule
+Yu et al. (2018)\cite{yuShipArrivalPrediction2018} & Data engineering & RF, ANN, CART & Port call data, vessel features & RF & Predict ETA using classification approach \\
+
+Chu et al. (2024b)\cite{chuEvaluationPredictionPunctuality2023} & Data engineering & RF, ANN, RNN, CART & Port call data, vessel features & RF & ETA prediction based on vessel-reported AIS \\
+
+Lei et al. (2024)\cite{leiPredictingVesselArrival2024} & Data engineering & RF, LSTM, XGBoost, LightGBM & AIS data & LightGBM & Inland ETA prediction with traffic flow integration \\
+
+Park et al. (2021)\cite{parkVesselEstimatedTime2021}  & Vessel trajectory & RL & AIS data & RL & Trajectory reconstruction and path finding method \\
+
+Wenzel et al. (2023)\cite{wenzelNeuralNetworkApproach2023} & Vessel trajectory & ANN, CNN, LSTM, RNN & AIS data & LSTM & Vessel travel distance evaluation with A* algorithm \\
+
+Yoon et al. (2023)\cite{yoonEnhancingContainerVessel2023} & Vessel trajectory & Interpolation method & AIS data & Interpolation & ETA prediction using voyage route patterns \\
+
+El Mekkaoui et al. (2023)\cite{elmekkaouiDeepLearningModels2022} & Vessel trajectory & CNN, LSTM, ANN, RNN & AIS data & LSTM & First bulk vessel VAT prediction study \\
+
+Kolley et al. (2023)\cite{kolleyRobustBerthScheduling2022} & Vessel trajectory & LR, DT, ANN, KNN & AIS data & KNN & Berth scheduling integration evaluation \\
+
+Du et al. (2025)\cite{duSegmentedETAPrediction2025} & Vessel trajectory & CNN, LSTM, GRU, TCN & AIS data, pilotage records & TCN & Pilotage area ETA prediction \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{ETA prediction based on path finding}
+Path- and trajectory-based methods form one of the most distinctive branches of maritime ETA research because they preserve explicit spatial structure rather than treating ETA purely as a tabular regression target. \cite{parkVesselEstimatedTime2021} proposed a path-finding-based ETA prediction system that combined AIS-derived route grids, Q-learning-based path search, and MCMC-based speed sampling, showing more stable ETA behavior than a Dijkstra-based baseline, especially over longer sailing distances. \cite{yoonEnhancingContainerVessel2023} developed a past-voyage route modeling approach in which representative historical routes were first constructed from prior port calls and then used to map real-time AIS positions and speeds for ETA prediction at Busan New Port. In methodological terms, these studies share the view that ETA accuracy can be improved by explicitly modeling the vessel’s remaining path, route regularity, and progress along historically meaningful trajectories. As summarized by \cite{jiangPredictionVesselArrival2025}, such trajectory-oriented approaches are especially valuable when route structure is informative and relatively repeatable, although their robustness may decline when vessels deviate from typical routes or when disruptions weaken the predictive value of historical path patterns.
+
+\subsection{ETA prediction based on feature engineering}
+A second and now highly influential branch treats ETA prediction as a supervised learning problem over AIS variables, vessel characteristics, and operational features. \cite{yuShipArrivalPrediction2018} provided an early example by comparing BP, CART, and Random Forest models for ship arrival prediction and then linking the resulting forecasts to berth allocation and quay crane scheduling, thereby showing that ETA prediction has operational value beyond statistical accuracy alone.\cite{chuEvaluationPredictionPunctuality2023} similarly used Random Forest regression to improve arrival-time prediction in the Hong Kong port context, substantially reducing forecast error relative to reported ETA. This branch has since become more feature-rich and ensemble-oriented. \cite{kolleyRobustBerthScheduling2022} integrated machine-learned ETA prediction into robust berth scheduling, emphasizing that better ETA models should ultimately improve planning resilience rather than only pointwise forecast quality. \cite{leiPredictingVesselArrival2024} showed that tree-based stacking can effectively absorb inland-waterway factors such as water depth and traffic flow, while \cite{chuVesselArrivalTime2025} fused port call records with AIS trajectories through time-aligned feature construction and stacking to improve vessel arrival-time prediction. \cite{saberHighaccuracyPredictionVessels2025} pushed this line further by combining Extra Trees, AutoGluon Tabular, LightGBM, and a Random Forest meta-learner in a hybrid stacking framework that achieved very strong predictive accuracy. Overall, this body of work indicates that machine-learning-based ETA research has progressed from single-model regression toward structured feature engineering, multi-source fusion, and stacked ensemble learning, with operational and environmental covariates becoming increasingly central to model design.
+
+\subsection{Research gaps in existing ETA prediction studies}
+Although tree-based and feature-engineering-based methods have achieved strong performance in maritime ETA prediction, largely because AIS data provide rich structured variables such as position, speed, heading, and voyage attributes, these approaches remain limited in modeling long-range temporal dependence and dynamic voyage evolution. To overcome this, some recent studies have explored deep learning models, showing that recurrent, convolutional, and segmented sequence frameworks can improve ETA estimation by better capturing local dynamics and temporal heterogeneity \citep{elmekkaouiDeepLearningModels2022,wenzelNeuralNetworkApproach2023,duSegmentedETAPrediction2025}. However, more advanced architectures that can jointly represent sequential evolution and structural dependence, such as graph-enhanced and Transformer-based models, are still rarely studied in direct maritime ETA prediction 
 
 \section{Methodology}
 
@@ -514,6 +561,87 @@ S.~El~Mekkaoui, L.~Benabbou, and A.~Berrado, ``Deep learning models for vessel e
 
 \bibitem{lloretbatlle2025}
 R.~Lloret-Batlle, R.~Mounce, and J.~Sherwood, ``Cross-Pacific vessel estimated time of arrival prediction with AIS trajectory data,'' \textit{Maritime Transport Research}, vol.~7, p.~100108, 2025.
+
+\bibitem{chenMaritimeTrafficSituation2023}
+X.~Chen, J.~Zheng, C.~Li, B.~Wu, H.~Wu, and J.~Montewka, ``Maritime Traffic Situation Awareness Analysis via High-Fidelity Ship Imaging Trajectory,'' \textit{Multimedia Tools and Applications}, vol.~83, no.~16, pp.~48907--48923, 2023. doi: 10.1007/s11042-023-17456-6.
+
+\bibitem{chuEvaluationPredictionPunctuality2023}
+Z.~Chu, R.~Yan, and S.~Wang, ``Evaluation and Prediction of Punctuality of Vessel Arrival at Port: A Case Study of Hong Kong,'' \textit{Maritime Policy \& Management}, vol.~51, no.~6, pp.~1096--1124, 2023. doi: 10.1080/03088839.2023.2217168.
+
+\bibitem{chuVesselArrivalTime2025}
+Z.~Chu, R.~Yan, and S.~Wang, ``Vessel Arrival Time to Port Prediction via a Stacked Ensemble Approach: Fusing Port Call Records and AIS Data,'' \textit{Transportation Research Part C: Emerging Technologies}, vol.~176, p.~105128, 2025. doi: 10.1016/j.trc.2025.105128.
+
+\bibitem{daiHybridSpatiotemporalGraph2020}
+R.~Dai, S.~Xu, Q.~Gu, C.~Ji, and K.~Liu, ``Hybrid Spatio-Temporal Graph Convolutional Network: Improving Traffic Prediction with Navigation Data,'' in \textit{Proceedings of the 26th ACM SIGKDD International Conference on Knowledge Discovery \& Data Mining}, Virtual Event CA USA, pp.~3074--3082, Aug. 2020. doi: 10.1145/3394486.3403358.
+
+\bibitem{duSegmentedETAPrediction2025}
+L.~Du, J.~Xiu, O.~A.~Valdez Banda, M.~Zhang, F.~Zhang, and Y.~Wen, ``A Segmented ETA Prediction Method for Inland Vessels Based on Improved DEKM and CNN-LSTM Algorithms,'' \textit{Ocean Engineering}, vol.~342, p.~122694, 2025. doi: 10.1016/j.oceaneng.2025.122694.
+
+\bibitem{efronPredictionEstimationAttribution2020}
+B.~Efron, ``Prediction, Estimation, and Attribution,'' \textit{International Statistical Review}, vol.~88, no.~S1, p.~S28-S59, 2020. doi: 10.1111/insr.12409.
+
+\bibitem{elmekkaouiDeepLearningModels2022}
+S.~El~Mekkaoui, L.~Benabbou, and A.~Berrado, ``Deep Learning Models for Vessel's ETA Prediction: Bulk Ports Perspective,'' \textit{Flexible Services and Manufacturing Journal}, vol.~35, no.~1, pp.~5--28, 2022. doi: 10.1007/s10696-022-09471-w.
+
+\bibitem{EnhancingContainerVessela}
+``Enhancing Container Vessel Arrival Time Prediction through Past Voyage Route Modeling: A Case Study of Busan New Port - Nanyang Technological University,'' https://ntu-sp.primo.exlibrisgroup.com,
+
+\bibitem{filomApplicationsMachineLearning2022}
+S.~Filom, A.~M.~Amiri, and S.~Razavi, ``Applications of Machine Learning Methods in Port Operations -- A Systematic Literature Review,'' \textit{Transportation Research Part E: Logistics and Transportation Review}, vol.~161, p.~102722, 2022. doi: 10.1016/j.tre.2022.102722.
+
+\bibitem{hongHetETAHeterogeneousInformation2020}
+H.~Hong, Y.~Lin, X.~Yang, Z.~Li, K.~Fu, Z.~Wang, X.~Qie, and J.~Ye, ``HetETA: Heterogeneous Information Network Embedding for Estimating Time of Arrival,'' in \textit{Proceedings of the 26th ACM SIGKDD International Conference on Knowledge Discovery \& Data Mining}, Virtual Event CA USA, pp.~2444--2454, Aug. 2020. doi: 10.1145/3394486.3403294.
+
+\bibitem{jiangPredictionVesselArrival2025}
+S.~Jiang, L.~Liu, P.~Peng, M.~Xu, and R.~Yan, ``Prediction of Vessel Arrival Time to Port: A Review of Current Studies,'' \textit{Maritime Policy \& Management}, vol.~53, no.~2, pp.~301--326, 2025. doi: 10.1080/03088839.2025.2488376.
+
+\bibitem{kolleyRobustBerthScheduling2022}
+L.~Kolley, N.~R{\"u}ckert, M.~Kastner, C.~Jahn, and K.~Fischer, ``Robust Berth Scheduling Using Machine Learning for Vessel Arrival Time Prediction,'' \textit{Flexible Services and Manufacturing Journal}, vol.~35, no.~1, pp.~29--69, 2022. doi: 10.1007/s10696-022-09462-x.
+
+\bibitem{leiPredictingVesselArrival2024}
+J.~Lei, Z.~Chu, Y.~Wu, X.~Liu, M.~Luo, W.~He, and C.~Liu, ``Predicting Vessel Arrival Times on Inland Waterways: A Tree-Based Stacking Approach,'' \textit{Ocean Engineering}, vol.~294, p.~116838, 2024. doi: 10.1016/j.oceaneng.2024.116838.
+
+\bibitem{liMultimodalFusionShip2026}
+Y.~Li, Y.~Bai, Q.~Mei, P.~Wang, Y.~Hu, Q.~Yan, and S.~Wang, ``Multimodal Fusion via Ship Trajectory Understanding for Cognitive Maritime Intelligence: A Case Study of the Fujian Sea,'' \textit{Ocean Engineering}, vol.~350, p.~124237, 2026. doi: 10.1016/j.oceaneng.2026.124237.
+
+\bibitem{linResearchShipDynamic2025}
+S.~Lin, Y.~Li, Y.~Hu, J.~Shi, S.~Wang, P.~Wang, Q.~Mei, X.~Li, and H.~Wei, ``Research on Ship Dynamic Feature Extraction and Prediction Method Based on Visual Data,'' \textit{Ocean Engineering}, vol.~327, p.~120938, 2025. doi: 10.1016/j.oceaneng.2025.120938.
+
+\bibitem{meiStructuralAnalysisVulnerability2024}
+Q.~Mei, H.~Qinyou, Y.~Hu, Y.~Yang, X.~Liu, Z.~Huang, and P.~Wang, ``Structural Analysis and Vulnerability Assessment of the European LNG Maritime Supply Chain Network (2018--2020),'' \textit{Ocean \& Coastal Management}, vol.~253, p.~107126, 2024.
+
+\bibitem{nguyenTrAISformerTransformerNetwork2024}
+D.~Nguyen and R.~Fablet, ``TrAISformer -- a Transformer Network with Sparse Augmented Data Representation and Cross Entropy Loss for AIS-based Vessel Trajectory Prediction,'' https://ieeexplore.ieee.org/document/10380549/, 2024.
+
+\bibitem{nomanReviewVesselTime2025}
+A.~A.~Noman, A.~Heuermann, S.~Wiesner, and K.~D.~Thoben, ``A Review of Vessel Time of Arrival Prediction on Waterway Networks: Current Trends, Open Issues, and Future Directions,'' \textit{Computers}, vol.~14, no.~2, p.~41, 2025. doi: 10.3390/computers14020041.
+
+\bibitem{parkVesselEstimatedTime2021}
+K.~Park, S.~Sim, and H.~Bae, ``Vessel Estimated Time of Arrival Prediction System Based on a Path-Finding Algorithm,'' \textit{Maritime Transport Research}, vol.~2, p.~100012, 2021. doi: 10.1016/j.martra.2021.100012.
+
+\bibitem{saberHighaccuracyPredictionVessels2025}
+S.~M.~Saber, K.~Z.~Thowai, M.~A.~Rahman, M.~M.~Hassan, A.~B.~M.~M.~Bari, and A.~Raihan, ``High-Accuracy Prediction of Vessels' Estimated Time of Arrival in Seaports: A Hybrid Machine Learning Approach,'' \textit{Maritime Transport Research}, vol.~8, p.~100133, 2025. doi: 10.1016/j.martra.2025.100133.
+
+\bibitem{wangIntelligentPortLogistics2025}
+P.~Wang, Q.~Hu, Q.~Mei, S.~Wang, Y.~Yang, D.~Guo, X.~Liu, W.~Hu, and J.~Chen, ``Intelligent Port Logistics: A Spatiotemporal Knowledge Graph and AI-agent Framework for Berth Allocation,'' \textit{Advanced Engineering Informatics}, vol.~68, p.~103633, 2025. doi: 10.1016/j.aei.2025.103633.
+
+\bibitem{wenzelNeuralNetworkApproach2023}
+P.~Wenzel, R.~Jovanovic, and F.~Schulte, ``A Neural Network Approach for ETA Prediction in Inland Waterway Transport,'' in \textit{Computational Logistics}, Cham, pp.~219--232, 2023. doi: 10.1007/978-3-031-43612-3\_13.
+
+\bibitem{wenzelNeuralNetworkApproach2023a}
+P.~Wenzel, R.~Jovanovic, and F.~Schulte, ``A Neural Network Approach for ETA Prediction in Inland Waterway Transport,'' in \textit{Computational Logistics}, ed. J.~R.~Daduna, G.~Liedtke, X.~Shi, and S.~Vo{\ss}, vol.~14239, pp.~219--232, Cham: Springer Nature Switzerland, 2023. doi: 10.1007/978-3-031-43612-3\_13.
+
+\bibitem{xieAISDatadrivenMaritime2025}
+Z.~Xie, E.~Tu, X.~Fu, G.~Yuan, and Y.~Han, ``AIS Data-Driven Maritime Monitoring Based on Transformer: A Comprehensive Review,'' 2025.
+
+\bibitem{yangHarnessingPowerMachine2024}
+Y.~Yang, Y.~Liu, G.~Li, Z.~Zhang, and Y.~Liu, ``Harnessing the Power of Machine Learning for AIS Data-Driven Maritime Research: A Comprehensive Review,'' \textit{Transportation Research Part E: Logistics and Transportation Review}, vol.~183, p.~103426, 2024. doi: 10.1016/j.tre.2024.103426.
+
+\bibitem{yoonEnhancingContainerVessel2023}
+J.~H.~Yoon, D.~H.~Kim, S.~W.~Yun, H.~J.~Kim, and S.~Kim, ``Enhancing Container Vessel Arrival Time Prediction through Past Voyage Route Modeling: A Case Study of Busan New Port,'' \textit{Journal of Marine Science and Engineering}, vol.~11, no.~6, p.~1234, 2023. doi: 10.3390/jmse11061234.
+
+\bibitem{yuShipArrivalPrediction2018}
+J.~Yu, G.~Tang, X.~Song, X.~Yu, Y.~Qi, D.~Li, and Y.~Zhang, ``Ship Arrival Prediction and Its Value on Daily Container Terminal Operation,'' \textit{Ocean Engineering}, vol.~157, pp.~73--86, 2018. doi: 10.1016/j.oceaneng.2018.03.038.
 
 \end{thebibliography}
 
