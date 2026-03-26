@@ -159,10 +159,19 @@ def main():
                         help='SWA learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                         help='Weight decay for AdamW')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Set random seed
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     print(f"Device: {device}")
     print(f"Args: {vars(args)}")
 
