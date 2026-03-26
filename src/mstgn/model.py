@@ -760,3 +760,150 @@ class MSTGN_V2(nn.Module):
 
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class MSTGN_FTTransformer(nn.Module):
+    """Feature-Tokenized Transformer for Maritime ETA.
+
+    Inspired by FT-Transformer (Gorishniy et al., NeurIPS 2021).
+    Each feature group becomes a token, then self-attention captures
+    inter-feature interactions — the key advantage of tree-based models
+    that plain MLPs lack.
+
+    Token structure (19 tokens total):
+    - 11 feature tokens: per-feature statistics (7 aggs each) → d_model
+    - 4 cross-feature tokens: pairwise interactions → d_model
+    - 3 graph tokens: GCN cell embeddings → d_model
+    - 1 [CLS] token: prediction target
+    """
+
+    def __init__(self, adj_matrix, init_node_features,
+                 seq_feat_dim=11, seq_len=48,
+                 gcn_hidden=64, cell_emb_dim=32,
+                 d_model=128, n_heads=4, n_layers=2,
+                 ffn_dim=256, dropout=0.1):
+        super().__init__()
+
+        node_feat_dim = init_node_features.shape[1]
+        self.seq_feat_dim = seq_feat_dim
+        self.d_model = d_model
+        self.n_cross = 4
+        self.n_graph = 3
+
+        # === Graph branch (same as MLP2) ===
+        self.register_buffer('adj', torch.from_numpy(adj_matrix).float())
+        self.node_features = nn.Parameter(
+            torch.from_numpy(init_node_features).float()
+        )
+        self.gcn1 = GCNLayer(node_feat_dim, gcn_hidden)
+        self.gcn2 = GCNLayer(gcn_hidden, cell_emb_dim)
+        self.gcn_drop = nn.Dropout(dropout)
+
+        # === Feature tokenizers ===
+        n_aggs = 7  # last, mean, std, diff, min, max, recent_12_mean
+        self.feat_tokenizers = nn.ModuleList([
+            nn.Linear(n_aggs, d_model) for _ in range(seq_feat_dim)
+        ])
+
+        # 4 cross-feature tokens: scalar → d_model
+        self.cross_tokenizers = nn.ModuleList([
+            nn.Linear(1, d_model) for _ in range(self.n_cross)
+        ])
+
+        # 3 graph tokens: cell_emb_dim → d_model
+        self.graph_tokenizers = nn.ModuleList([
+            nn.Linear(cell_emb_dim, d_model) for _ in range(self.n_graph)
+        ])
+
+        # [CLS] token
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+
+        # === Transformer encoder (pre-norm for stable training) ===
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=n_heads,
+            dim_feedforward=ffn_dim, dropout=dropout,
+            activation='gelu', batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer, num_layers=n_layers
+        )
+        self.final_norm = nn.LayerNorm(d_model)
+
+        # === Prediction head ===
+        self.head = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model // 2, 1)
+        )
+
+        self._init_weights()
+
+    def _init_weights(self):
+        gcn_linears = {self.gcn1.linear, self.gcn2.linear}
+        for m in self.modules():
+            if isinstance(m, nn.Linear) and m not in gcn_linears:
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x, cell_ids):
+        B = x.size(0)
+
+        # --- GCN cell embeddings ---
+        h = self.gcn1(self.node_features, self.adj)
+        h = self.gcn_drop(h)
+        cell_emb = self.gcn2(h, self.adj)
+
+        # --- Statistical features ---
+        last = x[:, -1, :]
+        mean = x.mean(dim=1)
+        std = x.std(dim=1)
+        diff = last - x[:, 0, :]
+        xmin = x.min(dim=1).values
+        xmax = x.max(dim=1).values
+        recent_mean = x[:, -12:, :].mean(dim=1)
+
+        # Stack: (B, 11, 7) — each feature has 7 aggregations
+        agg_stack = torch.stack(
+            [last, mean, std, diff, xmin, xmax, recent_mean], dim=-1
+        )
+
+        # --- Cross features ---
+        sog_x_dist = last[:, 2:3] * last[:, 4:5]
+        dist_sq = last[:, 4:5] ** 2
+        sog_x_bearing = last[:, 2:3] * last[:, 5:6]
+        sog_accel_x_dist = diff[:, 2:3] * last[:, 4:5]
+        cross_feats = [sog_x_dist, dist_sq, sog_x_bearing, sog_accel_x_dist]
+
+        # --- Graph contexts ---
+        current_cell = cell_emb[cell_ids[:, -1]]
+        origin_cell = cell_emb[cell_ids[:, 0]]
+        route_mean = cell_emb[cell_ids].mean(dim=1)
+        graph_contexts = [current_cell, origin_cell, route_mean]
+
+        # --- Tokenize ---
+        tokens = []
+        for i in range(self.seq_feat_dim):
+            tokens.append(self.feat_tokenizers[i](agg_stack[:, i, :]))
+        for i, cf in enumerate(cross_feats):
+            tokens.append(self.cross_tokenizers[i](cf))
+        for i, gc in enumerate(graph_contexts):
+            tokens.append(self.graph_tokenizers[i](gc))
+
+        tokens = torch.stack(tokens, dim=1)  # (B, 18, d_model)
+
+        # Prepend [CLS]
+        cls = self.cls_token.expand(B, -1, -1)
+        tokens = torch.cat([cls, tokens], dim=1)  # (B, 19, d_model)
+
+        # --- Transformer ---
+        out = self.transformer(tokens)
+
+        # --- Predict from [CLS] ---
+        cls_out = self.final_norm(out[:, 0, :])
+        return self.head(cls_out).squeeze(-1)
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)

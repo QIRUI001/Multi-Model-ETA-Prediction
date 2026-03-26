@@ -31,7 +31,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-from src.mstgn.model import MSTGN, MSTGN_LateFusion, MSTGN_MLP, MSTGN_MLP2, MSTGN_MLP3, StatMLP, MSTGN_Hybrid, HybridNoGraph, MSTGN_V2
+from src.mstgn.model import MSTGN, MSTGN_LateFusion, MSTGN_MLP, MSTGN_MLP2, MSTGN_MLP3, StatMLP, MSTGN_Hybrid, HybridNoGraph, MSTGN_V2, MSTGN_FTTransformer
 
 
 # ============================================================
@@ -141,10 +141,15 @@ def main():
     parser.add_argument('--gru_layers', type=int, default=2)
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--variant', type=str, default='gru',
-                        choices=['gru', 'late_fusion', 'mlp', 'mlp2', 'mlp3', 'stat_mlp', 'hybrid', 'hybrid_no_graph', 'v2'],
+                        choices=['gru', 'late_fusion', 'mlp', 'mlp2', 'mlp3', 'stat_mlp', 'hybrid', 'hybrid_no_graph', 'v2', 'ft_transformer'],
                         help='Model variant')
     parser.add_argument('--hidden_dim', type=int, default=512)
     parser.add_argument('--num_blocks', type=int, default=3)
+    # FT-Transformer hyperparameters
+    parser.add_argument('--d_model', type=int, default=128)
+    parser.add_argument('--n_heads', type=int, default=4)
+    parser.add_argument('--n_layers', type=int, default=2)
+    parser.add_argument('--ffn_dim', type=int, default=256)
     parser.add_argument('--scheduler', type=str, default='plateau',
                         choices=['plateau', 'cosine'],
                         help='LR scheduler type')
@@ -223,11 +228,11 @@ def main():
         'gru': MSTGN, 'late_fusion': MSTGN_LateFusion,
         'mlp': MSTGN_MLP, 'mlp2': MSTGN_MLP2, 'mlp3': MSTGN_MLP3, 'stat_mlp': StatMLP,
         'hybrid': MSTGN_Hybrid, 'hybrid_no_graph': HybridNoGraph,
-        'v2': MSTGN_V2,
+        'v2': MSTGN_V2, 'ft_transformer': MSTGN_FTTransformer,
     }[args.variant]
 
     no_graph_variants = {'stat_mlp', 'hybrid_no_graph'}
-    no_gru_variants = {'mlp', 'mlp2', 'mlp3', 'stat_mlp', 'v2'}
+    no_gru_variants = {'mlp', 'mlp2', 'mlp3', 'stat_mlp', 'v2', 'ft_transformer'}
 
     if args.variant in no_graph_variants:
         model_kwargs = dict(
@@ -246,6 +251,20 @@ def main():
             cell_emb_dim=args.cell_emb_dim,
             hidden_dim=args.hidden_dim,
             num_blocks=args.num_blocks,
+            dropout=args.dropout,
+        )
+    elif args.variant == 'ft_transformer':
+        model_kwargs = dict(
+            adj_matrix=adj,
+            init_node_features=node_features,
+            seq_feat_dim=train_ds.X.shape[-1],
+            seq_len=train_ds.X.shape[1],
+            gcn_hidden=args.gcn_hidden,
+            cell_emb_dim=args.cell_emb_dim,
+            d_model=args.d_model,
+            n_heads=args.n_heads,
+            n_layers=args.n_layers,
+            ffn_dim=args.ffn_dim,
             dropout=args.dropout,
         )
     else:
