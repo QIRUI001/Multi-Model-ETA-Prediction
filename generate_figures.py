@@ -137,12 +137,14 @@ def draw_training_curve():
 
 
 def draw_baseline_comparison():
-    """Generate baseline MAE comparison bar chart with all 10 models grouped by family."""
+    """Generate baseline MAE comparison bar chart with all models grouped by family."""
     # Results grouped by family (excluding Ridge for main chart)
     models = ['MLP', 'LSTM', 'GRU', '1D-CNN', 'TCN', 'XGBoost', 
-              'Transformer', 'Conv-Trans.', 'Informer']
+              'Transformer', 'Conv-Trans.', 'Informer',
+              'MSTGN-MLP', 'StatMLP', 'MSTGN-Late']
     maes = [15.73, 15.79, 16.03, 16.08, 17.19, 15.14, 
-            18.12, 16.60, 16.20]
+            18.12, 16.60, 16.20,
+            15.40, 15.41, 15.56]
     
     # Color by family
     family_colors = {
@@ -151,9 +153,11 @@ def draw_baseline_comparison():
         'Convolutional': '#FFCC80', # orange
         'Tree': '#EF9A9A',          # red
         'Attention': '#CE93D8',     # purple
+        'Graph': '#80CBC4',         # teal
     }
     families = ['Feedforward', 'Recurrent', 'Recurrent', 'Convolutional', 'Convolutional',
-                'Tree', 'Attention', 'Attention', 'Attention']
+                'Tree', 'Attention', 'Attention', 'Attention',
+                'Graph', 'Graph', 'Graph']
     colors = [family_colors[f] for f in families]
     
     # Sort by MAE for visual clarity
@@ -163,7 +167,7 @@ def draw_baseline_comparison():
     colors_sorted = [colors[i] for i in sorted_indices]
     families_sorted = [families[i] for i in sorted_indices]
     
-    fig, ax = plt.subplots(1, 1, figsize=(7, 4))
+    fig, ax = plt.subplots(1, 1, figsize=(7, 5))
     
     y_pos = range(len(models_sorted))
     bars = ax.barh(y_pos, maes_sorted, color=colors_sorted, edgecolor='#424242', linewidth=0.5, height=0.7)
@@ -198,6 +202,8 @@ def draw_baseline_comparison():
 
 if __name__ == '__main__':
     draw_architecture()
+    draw_training_curve()
+    draw_baseline_comparison()
     draw_training_curve()
     draw_baseline_comparison()
     print("\nAll figures generated.")

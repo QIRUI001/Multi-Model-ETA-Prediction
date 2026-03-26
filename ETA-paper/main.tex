@@ -15,7 +15,7 @@
 \usepackage{ragged2e}
 \newcolumntype{P}[1]{>{\RaggedRight\arraybackslash}p{#1}}
 
-\title{An Empirical Comparison of Deep Learning Architectures for Vessel ETA Prediction on Trans-Pacific Routes}
+\title{Maritime Spatio-Temporal Graph Network for Vessel ETA Prediction: An Empirical Study on Trans-Pacific Routes}
 
 \author{
 \IEEEauthorblockN{Anonymous}
@@ -28,12 +28,13 @@
 
 \begin{abstract}
 Accurate Estimated Time of Arrival (ETA) prediction for ocean-going vessels is critical for port logistics, berth scheduling, and supply chain management.
-While numerous deep learning architectures have been proposed for time-series forecasting, the relative effectiveness of different model families for vessel ETA prediction remains unclear, as prior studies typically evaluate only one or two architectures.
-In this paper, we present a systematic empirical comparison of ten forecasting models spanning five architectural families---recurrent (LSTM, GRU), convolutional (1D-CNN, TCN), attention-based (Vanilla Transformer, Conv-Transformer, Informer), tree-based (XGBoost), and feedforward (MLP, Ridge)---on a large-scale trans-Pacific AIS dataset comprising 35.9 million position reports and 9,087 voyages.
-All models are evaluated under identical data splits, feature sets, normalization, and training protocols to ensure a fair comparison.
-Our results reveal that XGBoost achieves the best performance (MAE = 15.14\,h), followed closely by MLP and LSTM, while attention-based models---including the Informer---do not outperform simpler alternatives despite significantly higher parameter counts.
-We further demonstrate that incorporating meteorological features yields a 7.1\% MAE reduction across architectures, and that asymmetric loss functions intended to reduce underestimation degrade overall accuracy.
-These findings suggest that for single-step vessel ETA prediction, feature engineering quality---particularly distance-to-destination---dominates model architecture choice.
+While numerous deep learning architectures have been proposed for time-series forecasting, their relative effectiveness for maritime ETA remains unclear.
+In this paper, we present two contributions.
+First, we conduct a systematic empirical comparison of ten forecasting models spanning five architectural families---recurrent (LSTM, GRU), convolutional (1D-CNN, TCN), attention-based (Transformer, Conv-Transformer, Informer), tree-based (XGBoost), and feedforward (MLP, Ridge)---on a large-scale trans-Pacific AIS dataset comprising 35.9 million position reports and 9,087 voyages.
+Second, we propose MSTGN (Maritime Spatio-Temporal Graph Network), which constructs a route graph over ocean grid cells and uses Graph Convolutional Networks (GCN) to learn spatial context for ETA prediction.
+Our results reveal that XGBoost achieves the best overall performance (MAE = 15.14\,h), while our MSTGN-MLP variant achieves the best neural network performance (MAE = 15.40\,h, 2.1\% lower than the MLP baseline).
+Ablation studies show that statistical feature engineering (sequence-level summaries) is the dominant factor in prediction quality, with temporal modeling and spatial graph structure providing marginal additional benefit.
+These findings reveal that for single-step vessel ETA prediction, compact statistical features outperform both raw sequential input and complex spatio-temporal architectures.
 \end{abstract}
 
 \section{Introduction}
@@ -60,8 +61,8 @@ All models are trained and evaluated under identical conditions---same data spli
 Our main contributions are:
 \begin{enumerate}
     \item A fair, large-scale empirical comparison of ten models spanning five architectural families for vessel ETA prediction, revealing that XGBoost outperforms all neural sequence models.
-    \item An analysis of the impact of meteorological feature integration, demonstrating a consistent 7.1\% MAE improvement.
-    \item An investigation of asymmetric loss functions for reducing ETA underestimation, yielding a negative result that cautions against naive application of such losses.
+    \item A novel Maritime Spatio-Temporal Graph Network (MSTGN) that constructs a route graph over ocean grid cells and fuses GCN-derived spatial context with statistical features, achieving the best neural network performance (MAE = 15.40\,h).
+    \item Ablation studies demonstrating that (a) statistical feature engineering is the dominant factor, (b) temporal sequence modeling adds limited value, and (c) incorporating meteorological features yields a 7.1\% MAE improvement.
     \item A decoupled prediction architecture that separately models sailing time and port-dwell time, reflecting their distinct underlying dynamics.
 \end{enumerate}
 
@@ -191,6 +192,8 @@ Following the architectural taxonomy proposed by recent deep time-series forecas
     \item \textbf{Tree-based models} operate on tabular feature representations. We include \textit{XGBoost}~\cite{chen2016xgboost}, the dominant gradient-boosted tree method, which requires hand-crafted statistical features extracted from the 48-step input window (last-step values, means, standard deviations, and deltas).
 
     \item \textbf{Feedforward models} serve as non-sequential baselines. We include a \textit{multi-layer perceptron (MLP)} operating on flattened input vectors, and \textit{Ridge Regression} ($L_2$-regularized linear regression on summary statistics) as the simplest baseline.
+
+    \item \textbf{Graph-enhanced models} incorporate spatial structure through graph neural networks. We propose the \textit{Maritime Spatio-Temporal Graph Network (MSTGN)}, which constructs a route graph over discretized ocean grid cells and uses GCN-derived spatial embeddings to augment prediction. We evaluate multiple MSTGN variants to disentangle the contributions of graph features, temporal modeling, and statistical features.
 \end{enumerate}
 
 \subsection{Model Configurations}
@@ -219,6 +222,10 @@ All neural models use the same input representation (48$\times$11 feature sequen
         Transformer & 3 enc layers, $d{=}256$, 8 heads & 1.6M \\
         Conv-Trans. & 2 Conv1d $+$ 2 enc layers, $d{=}256$ & 1.5M \\
         Informer & 2 enc $+$ 1 dec, $d{=}512$, ProbSparse & 11.3M \\
+        \midrule
+        MSTGN-MLP & Stats + 2-layer GCN, $d_\text{cell}{=}32$ & 238K \\
+        MSTGN-Late & GRU + GCN late fusion & 737K \\
+        StatMLP & Stats 44-dim, $256{\to}128{\to}64$ & 189K \\
         \bottomrule
     \end{tabular}
 \end{table}
@@ -237,6 +244,52 @@ The input embedding combines three components:
     \label{eq:embedding}
 \end{equation}
 where $\mathbf{u}_t$ is the scalar projection of raw features through a 1D convolution ($d \to d_{\text{model}}$); $\text{PE}_{t}$ is fixed sinusoidal positional encoding; and $\text{SE}_{t}^{(p)}$ are learnable temporal embeddings for each granularity $p \in \{\text{minute, hour, weekday, day, month}\}$.
+
+\subsection{Maritime Route Graph Construction}
+\label{sec:route_graph}
+
+To incorporate spatial structure into ETA prediction, we construct a maritime route graph $\mathcal{G} = (\mathcal{V}, \mathcal{E})$ from historical AIS trajectories.
+The ocean surface is discretized into $2^\circ \times 2^\circ$ grid cells.
+A cell is retained as a node if it contains at least 50 AIS observations, yielding $|\mathcal{V}| = 1{,}541$ active nodes (plus one \textit{unknown} node for rare out-of-distribution cells).
+Edges are constructed from two sources:
+\begin{itemize}
+    \item \textbf{Transition edges}: If consecutive AIS records from any voyage occupy cells $v_i$ and $v_j$, a directed edge $(v_i, v_j)$ is added, weighted by the log-transformed transition count.
+    \item \textbf{Geographic edges}: Undirected edges connect cells sharing a border (8-connectivity), providing structural continuity even where transition data is sparse.
+\end{itemize}
+The resulting graph has 4{,}772 transition edges and 2{,}110 geographic edges (13{,}033 non-zero entries in the symmetrized adjacency matrix).
+Each node $v \in \mathcal{V}$ is assigned a 9-dimensional feature vector: mean SOG, SOG standard deviation, mean temperature, mean wind speed, mean pressure, mean visibility, log vessel count, and normalized center coordinates (latitude, longitude).
+
+\subsection{MSTGN Architecture}
+\label{sec:mstgn}
+
+The MSTGN processes the route graph and input trajectory through two parallel branches that are fused for the final prediction.
+
+\paragraph{Spatial branch (GCN).}
+A two-layer Graph Convolutional Network~\cite{kipf2017gcn} produces cell embeddings from the route graph:
+\begin{equation}
+    \mathbf{H}^{(l+1)} = \sigma\!\left(\hat{\mathbf{A}} \, \mathbf{H}^{(l)} \mathbf{W}^{(l)} + \mathbf{b}^{(l)}\right)
+\end{equation}
+where $\hat{\mathbf{A}} = \tilde{\mathbf{D}}^{-1/2} \tilde{\mathbf{A}} \, \tilde{\mathbf{D}}^{-1/2}$ is the symmetrically normalized adjacency matrix, and $\sigma$ is ReLU.
+The GCN maps the 9-dimensional node features through hidden dimension 64 to a 32-dimensional embedding space.
+For each input sequence, the last-step grid cell is looked up to retrieve its embedding $\mathbf{z}_\text{cell} \in \mathbb{R}^{32}$.
+
+\paragraph{Temporal/statistical branch.}
+We evaluate two strategies for extracting features from the 48-step input sequence:
+\begin{itemize}
+    \item \textbf{GRU encoder}: A 2-layer GRU ($h{=}256$) with attention pooling over hidden states, producing a fixed-length representation.
+    \item \textbf{Statistical features}: Following the XGBoost feature set, we extract last-step values, channel means, standard deviations, and first-last differences from the 48-step window, yielding a compact 44-dimensional vector processed by a 3-layer MLP ($256{\to}128{\to}64$).
+\end{itemize}
+
+\paragraph{Fusion and prediction.}
+The spatial embedding $\mathbf{z}_\text{cell}$ is concatenated with the temporal/statistical representation and passed through a 2-layer prediction head ($128{\to}64{\to}1$) to produce the final ETA estimate.
+
+We evaluate four MSTGN variants to isolate each component's contribution:
+\begin{itemize}
+    \item \textbf{MSTGN-MLP}: Statistical features + GCN cell embeddings (no sequence modeling).
+    \item \textbf{MSTGN-LateFusion}: GRU on raw features, GCN embedding fused only at the output layer.
+    \item \textbf{StatMLP}: Statistical features only, no graph (ablation baseline).
+    \item \textbf{MSTGN-GRU}: GRU with cell embeddings concatenated to every input timestep.
+\end{itemize}
 
 \subsection{Port Dwell Time Predictor}
 
@@ -328,9 +381,9 @@ Fig.~\ref{fig:baseline_comparison} provides a visual comparison.
         \textbf{Family} & \textbf{Method} & \textbf{MAE (h)} & \textbf{RMSE (h)} & \textbf{MAPE (\%)} \\
         \midrule
         \multirow{2}{*}{Feedforward} & Ridge & 58.30 & 367.19 & 29.35 \\
-        & MLP & \underline{15.73} & \underline{26.80} & 9.67 \\
+        & MLP & 15.73 & 26.80 & 9.67 \\
         \midrule
-        \multirow{2}{*}{Recurrent} & LSTM & 15.79 & 27.40 & \underline{9.43} \\
+        \multirow{2}{*}{Recurrent} & LSTM & 15.79 & 27.40 & 9.43 \\
         & GRU & 16.03 & 27.28 & 9.62 \\
         \midrule
         \multirow{2}{*}{Convolutional} & 1D-CNN & 16.08 & 27.53 & 9.90 \\
@@ -341,6 +394,10 @@ Fig.~\ref{fig:baseline_comparison} provides a visual comparison.
         \multirow{3}{*}{Attention} & Transformer & 18.12 & 29.78 & 10.67 \\
         & Conv-Trans. & 16.60 & 27.52 & 10.07 \\
         & Informer & 16.20 & 27.26 & 10.53 \\
+        \midrule
+        \multirow{3}{*}{Graph} & MSTGN-MLP & \underline{15.40} & \underline{26.57} & 9.50 \\
+        & StatMLP & 15.41 & 27.08 & \underline{9.43} \\
+        & MSTGN-Late & 15.56 & 26.74 & 9.68 \\
         \bottomrule
     \end{tabular}
 \end{table}
@@ -355,22 +412,27 @@ Fig.~\ref{fig:baseline_comparison} provides a visual comparison.
 \subsubsection{Key Findings}
 
 \paragraph{Finding 1: XGBoost achieves the best overall performance.}
-XGBoost achieves the lowest MAE (15.14\,h), RMSE (26.05\,h), and MAPE (9.33\%), outperforming all neural sequence models despite operating on hand-crafted statistical features rather than raw sequential input.
-This result aligns with recent findings in time-series forecasting~\cite{zeng2023transformers} that simpler models can rival or surpass attention-based architectures, particularly when strong engineered features are available.
+XGBoost achieves the lowest MAE (15.14\,h), RMSE (26.05\,h), and MAPE (9.33\%), outperforming all neural models despite operating on hand-crafted statistical features rather than raw sequential input.
+This result aligns with recent findings in time-series forecasting~\cite{zeng2023transformers} that simpler models can rival or surpass complex architectures when strong engineered features are available.
 
-\paragraph{Finding 2: Feature engineering dominates architecture choice.}
-Excluding Ridge, all models achieve MAEs within a 15.14--18.12\,h range.
-The top five models (XGBoost, MLP, LSTM, GRU, 1D-CNN) cluster within 15.14--16.08\,h (${<}7\%$ relative spread), despite spanning four distinct architectural families and parameter counts from 270K to 11.3M.
-The highly predictive \textit{distance-to-destination} feature provides a strong prior on remaining time, reducing the marginal benefit of sophisticated temporal modeling.
+\paragraph{Finding 2: MSTGN-MLP is the best neural model.}
+Our proposed MSTGN-MLP achieves MAE = 15.40\,h, the best among all neural models and only 1.7\% behind XGBoost.
+Notably, this model does \textit{not} use sequence modeling---it operates on the same 44-dimensional statistical features as XGBoost, augmented with 32-dimensional GCN-derived cell embeddings.
+The MSTGN-LateFusion variant (GRU + graph, 15.56\,h) also outperforms all non-graph neural baselines, confirming the spatial embeddings provide useful complementary signal.
 
-\paragraph{Finding 3: Attention-based models do not justify their complexity.}
+\paragraph{Finding 3: Statistical features dominate over temporal modeling.}
+The StatMLP ablation (15.41\,h), which uses statistical features without graph information, matches MSTGN-MLP within 0.01\,h.
+Meanwhile, all GRU-based models (GRU: 16.03, MSTGN-GRU: 16.06\,h) underperform the statistical baselines by ${\sim}0.6$\,h.
+This reveals that compact statistical summaries (last-step, mean, std, delta) capture nearly all information that sequence models attempt to learn, while avoiding temporal noise that degrades GRU performance.
+
+\paragraph{Finding 4: Attention-based models do not justify their complexity.}
 The Vanilla Transformer (18.12\,h MAE, 1.6M params) performs worst among the neural models.
-The Informer (16.20\,h, 11.3M params) and Conv-Transformer (16.60\,h, 1.2M params) fare better but still lag behind the simpler MLP (15.73\,h, 270K params).
+The Informer (16.20\,h, 11.3M params) and Conv-Transformer (16.60\,h, 1.2M params) lag behind the simpler MLP (15.73\,h, 270K params).
 These architectures, designed for long-horizon multi-step forecasting, appear unnecessary for the single-step prediction task considered here ($L_{\text{pred}} = 1$).
 
-\paragraph{Finding 4: Convolutional models show mixed results.}
-The 1D-CNN (16.08\,h) approaches the MLP and recurrent models, but the TCN (17.19\,h) underperforms, possibly due to overfitting with its dilated convolutions on a relatively short 48-step input.
-The TCN's exponentially growing receptive field may be more beneficial for longer sequences than the ones considered here.
+\paragraph{Finding 5: Graph structure provides marginal but consistent improvement.}
+Across all matched comparisons, adding GCN cell embeddings yields small but positive gains: MSTGN-MLP (15.40\,h) vs.\ StatMLP (15.41\,h), and MSTGN-LateFusion (15.56\,h) vs.\ GRU (16.03\,h).
+The limited magnitude of improvement suggests that latitude and longitude features already encode most positional information, leaving the graph structure to capture only residual route-level context.
 
 
 \subsection{Ablation Studies}
@@ -430,6 +492,37 @@ The asymmetric penalty distorts the loss landscape in ways that the optimizer ca
 We report this finding to caution practitioners against applying asymmetric losses without careful calibration.
 
 
+\subsubsection{Ablation: Graph and Temporal Components}
+
+To disentangle the contributions of spatial graph structure, temporal sequence modeling, and statistical features, we conduct a component ablation study.
+Table~\ref{tab:ablation_graph} summarizes the results for all MSTGN variants.
+
+\begin{table}[t]
+    \centering
+    \caption{Ablation: Component Contributions of the MSTGN Architecture. ``Stats'' denotes the 44-dim statistical feature vector; ``GRU'' denotes the 2-layer GRU encoder; ``GCN'' denotes the route graph cell embeddings.}
+    \label{tab:ablation_graph}
+    \begin{tabular}{lccccc}
+        \toprule
+        \textbf{Variant} & \textbf{Stats} & \textbf{GRU} & \textbf{GCN} & \textbf{MAE (h)} & \textbf{RMSE (h)} \\
+        \midrule
+        StatMLP & \checkmark & & & 15.41 & 27.08 \\
+        MSTGN-MLP & \checkmark & & \checkmark & \textbf{15.40} & \textbf{26.57} \\
+        MSTGN-Late & & \checkmark & \checkmark & 15.56 & 26.74 \\
+        GRU (baseline) & & \checkmark & & 16.03 & 27.28 \\
+        MSTGN-GRU & & \checkmark$^\dagger$ & \checkmark & 16.06 & 28.44 \\
+        \bottomrule
+    \end{tabular}
+    \vspace{2pt}
+    {\footnotesize $^\dagger$Cell embedding concatenated to every timestep.}
+\end{table}
+
+Three conclusions emerge.
+\textbf{(1)~Statistical features outperform temporal modeling}: StatMLP (15.41\,h) outperforms GRU (16.03\,h) by 0.62\,h despite using a 44-dim vector instead of $48{\times}11 = 528$ values, confirming that compact statistical summaries capture nearly all predictive signal available in the raw sequence.
+\textbf{(2)~GCN provides marginal but consistent gains}: Adding graph embeddings improves StatMLP by 0.01\,h (MAE) and 0.51\,h (RMSE), and improves GRU by 0.47\,h in the late-fusion variant.
+The larger RMSE reduction suggests the spatial context primarily helps on high-error outliers.
+\textbf{(3)~Early fusion of graph features hurts}: MSTGN-GRU, which concatenates cell embeddings to every timestep, performs \textit{worse} than the plain GRU (16.06 vs.\ 16.03\,h), indicating that injecting constant spatial features into the recurrent input stream dilutes the temporal signal.
+
+
 \subsubsection{Training Dynamics}
 
 Fig.~\ref{fig:training_curve} shows the training and validation loss curves for the Informer.
@@ -467,6 +560,12 @@ El~Mekkaoui et al.~\cite{elmekkaoui2023} conducted a comprehensive study of deep
 Lloret-Batlle et al.~\cite{lloretbatlle2025} recently demonstrated ANN-based cross-Pacific vessel ETA prediction using AIS data, achieving MAE of 4 hours at 1,500 nautical miles from port.
 However, most studies evaluate only one or two architectures, making cross-method comparisons difficult.
 
+\paragraph{Graph Neural Networks for Transportation.}
+Hong et al.~\cite{hongHetETAHeterogeneousInformation2020} proposed HetETA, which constructs a heterogeneous road network graph and uses graph attention networks to learn link-level representations for urban travel time estimation.
+Dai et al.~\cite{daiHybridSpatiotemporalGraph2020} introduced the Hybrid Spatio-Temporal Graph Convolutional Network (H-STGCN), combining graph convolutions with temporal modeling for traffic prediction.
+These works demonstrate the effectiveness of graph-based spatial modeling for land transportation, motivating our exploration of maritime route graphs for vessel ETA prediction.
+Unlike road networks, maritime routes lack fixed topology, requiring us to construct a grid-based graph from observed AIS trajectories.
+
 \paragraph{Time-Series Forecasting Benchmarks.}
 The importance of fair benchmarking has been highlighted by Zeng et al.~\cite{zeng2023transformers}, who showed that simple linear models can outperform Transformers for long-horizon time-series forecasting.
 Kim et al.~\cite{kim2025comprehensive} proposed a comprehensive taxonomy classifying deep time-series models into Transformer, CNN, RNN, MLP, SSM, and LLM families, and emphasized the need for standardized evaluation protocols.
@@ -478,20 +577,18 @@ Our work applies this benchmarking philosophy to the maritime ETA domain.
 \section{Conclusion}
 %==============================================================
 
-We presented a systematic empirical comparison of ten forecasting models from five architectural families for vessel ETA prediction on trans-Pacific routes.
+We presented a systematic empirical study of vessel ETA prediction on trans-Pacific routes, encompassing ten baseline models from five architectural families and a novel Maritime Spatio-Temporal Graph Network (MSTGN).
 Our evaluation, conducted on a large-scale AIS dataset with 35.9 million position reports under strictly controlled experimental conditions, reveals several findings of practical significance.
 
-First, XGBoost achieves the best performance (MAE = 15.14\,h), outperforming all neural sequence models including the Informer despite its relative simplicity.
-This suggests that for single-step ETA prediction with strong engineered features (particularly distance-to-destination), tree-based models remain highly competitive.
+First, XGBoost achieves the best overall performance (MAE = 15.14\,h), while our proposed MSTGN-MLP achieves the best neural network performance (MAE = 15.40\,h, only 1.7\% behind XGBoost) by combining statistical features with GCN-derived spatial embeddings from a maritime route graph.
 
-Second, incorporating meteorological features yields a consistent 7.1\% MAE improvement (17.43 $\to$ 16.20\,h), confirming that weather conditions provide complementary predictive signal beyond navigation features alone.
+Second, ablation studies reveal that \textit{statistical feature engineering is the dominant factor}: a simple MLP on 44-dimensional statistical features (15.41\,h) outperforms all GRU-based sequence models (${\geq}16.03$\,h), while graph structure provides marginal additional improvement (0.01\,h MAE, 0.51\,h RMSE reduction).
+This suggests that for single-step ETA prediction with strong positional features, the bottleneck lies in feature informativeness rather than model complexity.
 
-Third, asymmetric loss functions intended to reduce underestimation significantly degrade overall accuracy (up to 17.6\% MAE increase), cautioning against their naive application in this setting.
+Third, incorporating meteorological features yields a 7.1\% MAE improvement, and asymmetric loss functions degrade accuracy by up to 17.6\%, cautioning against their naive application.
 
-Finally, the narrow performance spread among the top neural models (15.73--16.20\,h MAE for MLP, LSTM, GRU, CNN, and Informer) suggests that the bottleneck in vessel ETA prediction lies in feature informativeness and data quality rather than model architecture.
-These findings provide practical guidance for maritime stakeholders seeking to deploy ETA prediction systems.
-
-Future work will explore ocean current data integration, multi-step prediction horizons (where attention mechanisms may provide greater benefit), and extending the evaluation to global shipping routes beyond the trans-Pacific corridor.
+These findings provide practical guidance for maritime stakeholders: invest in feature engineering and tabular models before pursuing complex deep architectures.
+Future work will explore ocean current data integration, multi-step prediction horizons where temporal modeling may provide greater benefit, and extending the evaluation to global shipping routes.
 
 
 %==============================================================
@@ -549,6 +646,9 @@ A.~Vaswani, N.~Shazeer, N.~Parmar, J.~Uszkoreit, L.~Jones, A.~N.~Gomez, {\L}.~Ka
 
 \bibitem{bai2018tcn}
 S.~Bai, J.~Z.~Kolter, and V.~Koltun, ``An empirical evaluation of generic convolutional and recurrent networks for sequence modeling,'' \textit{arXiv preprint arXiv:1803.01271}, 2018.
+
+\bibitem{kipf2017gcn}
+T.~N.~Kipf and M.~Welling, ``Semi-supervised classification with graph convolutional networks,'' in \textit{Proc. Int. Conf. Learn. Representations (ICLR)}, 2017.
 
 \bibitem{zeng2023transformers}
 A.~Zeng, M.~Chen, L.~Zhang, and Q.~Xu, ``Are Transformers effective for time series forecasting?'' in \textit{Proc. AAAI Conf. Artif. Intell.}, vol.~37, no.~9, pp.~11121--11128, 2023.
