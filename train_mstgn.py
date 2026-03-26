@@ -71,36 +71,48 @@ def send_discord_notification(message):
 class MSTGNDataset(Dataset):
     """Dataset that provides sequence features, cell IDs, and targets."""
 
-    def __init__(self, X_path, cell_ids_path, y_path, actual_length=None):
+    def __init__(self, X_path, cell_ids_path, y_path, actual_length=None,
+                 soft_targets_path=None):
         self.X = np.load(X_path, mmap_mode='r')
         self.cell_ids = np.load(cell_ids_path, mmap_mode='r')
         self.y = np.load(y_path, mmap_mode='r')
+        self.soft = np.load(soft_targets_path, mmap_mode='r') if soft_targets_path else None
         self.length = actual_length if actual_length is not None else len(self.y)
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, idx):
-        return (
+        items = (
             torch.from_numpy(self.X[idx].copy()).float(),
             torch.from_numpy(self.cell_ids[idx].copy()).long(),
             torch.tensor(self.y[idx]).float()
         )
+        if self.soft is not None:
+            return items + (torch.tensor(self.soft[idx]).float(),)
+        return items
 
 
 # ============================================================
 # Training
 # ============================================================
 
-def train_one_epoch(model, loader, optimizer, criterion, device, epoch, epochs):
+def train_one_epoch(model, loader, optimizer, criterion, device, epoch, epochs,
+                    distill_alpha=0.0):
     model.train()
     losses = []
     pbar = tqdm(loader, desc=f"Train {epoch+1}/{epochs}", leave=False)
-    for x, cell_ids, y in pbar:
-        x, cell_ids, y = x.to(device), cell_ids.to(device), y.to(device)
+    for batch in pbar:
+        x, cell_ids, y = batch[0].to(device), batch[1].to(device), batch[2].to(device)
         optimizer.zero_grad()
         pred = model(x, cell_ids)
-        loss = criterion(pred, y)
+        loss_hard = criterion(pred, y)
+        if distill_alpha > 0 and len(batch) > 3:
+            y_soft = batch[3].to(device)
+            loss_soft = nn.functional.mse_loss(pred, y_soft)
+            loss = (1 - distill_alpha) * loss_hard + distill_alpha * loss_soft
+        else:
+            loss = loss_hard
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
@@ -114,8 +126,8 @@ def evaluate(model, loader, criterion, device):
     model.eval()
     losses = []
     preds, targets = [], []
-    for x, cell_ids, y in loader:
-        x, cell_ids, y = x.to(device), cell_ids.to(device), y.to(device)
+    for batch in loader:
+        x, cell_ids, y = batch[0].to(device), batch[1].to(device), batch[2].to(device)
         pred = model(x, cell_ids)
         losses.append(criterion(pred, y).item())
         preds.append(pred.cpu().numpy())
@@ -166,6 +178,13 @@ def main():
                         help='Weight decay for AdamW')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility')
+    # Knowledge distillation
+    parser.add_argument('--distill', action='store_true',
+                        help='Enable knowledge distillation from ensemble soft targets')
+    parser.add_argument('--distill_alpha', type=float, default=0.5,
+                        help='Weight for soft target loss (0=hard only, 1=soft only)')
+    parser.add_argument('--soft_targets_dir', type=str, default=None,
+                        help='Directory containing y_soft_{split}.npy files')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -200,13 +219,24 @@ def main():
     cache_dir = Path(args.cache_dir)
     counts = np.load(cache_dir / 'actual_counts.npy', allow_pickle=True).item()
 
+    # Soft targets for knowledge distillation
+    soft_dir = None
+    if args.distill:
+        soft_dir = Path(args.soft_targets_dir) if args.soft_targets_dir else cache_dir / 'soft_targets'
+        if not (soft_dir / 'y_soft_train.npy').exists():
+            print(f"ERROR: Soft targets not found in {soft_dir}. Run generate_soft_targets.py first.")
+            sys.exit(1)
+        print(f"Knowledge distillation enabled: alpha={args.distill_alpha}, soft_dir={soft_dir}")
+
     train_ds = MSTGNDataset(
         cache_dir / 'X_train.npy', cache_dir / 'cell_ids_train.npy',
-        cache_dir / 'y_train.npy', counts['train']
+        cache_dir / 'y_train.npy', counts['train'],
+        soft_targets_path=soft_dir / 'y_soft_train.npy' if soft_dir else None
     )
     val_ds = MSTGNDataset(
         cache_dir / 'X_val.npy', cache_dir / 'cell_ids_val.npy',
-        cache_dir / 'y_val.npy', counts['val']
+        cache_dir / 'y_val.npy', counts['val'],
+        soft_targets_path=soft_dir / 'y_soft_val.npy' if soft_dir else None
     )
     test_ds = MSTGNDataset(
         cache_dir / 'X_test.npy', cache_dir / 'cell_ids_test.npy',
@@ -314,7 +344,8 @@ def main():
 
     for epoch in range(args.epochs):
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion,
-                                     device, epoch, args.epochs)
+                                     device, epoch, args.epochs,
+                                     distill_alpha=args.distill_alpha if args.distill else 0.0)
         val_loss, _, _ = evaluate(model, val_loader, criterion, device)
 
         if args.swa and epoch >= args.swa_start:
@@ -356,8 +387,8 @@ def main():
         print("  Updating SWA batch norm statistics...")
         swa_model.train()
         with torch.no_grad():
-            for x, cell_ids, y in tqdm(train_loader, desc='SWA BN', leave=False):
-                x, cell_ids = x.to(device), cell_ids.to(device)
+            for batch in tqdm(train_loader, desc='SWA BN', leave=False):
+                x, cell_ids = batch[0].to(device), batch[1].to(device)
                 swa_model(x, cell_ids)
         swa_model.eval()
         _, y_pred_norm, y_true_norm = evaluate(swa_model, test_loader, criterion, device)
