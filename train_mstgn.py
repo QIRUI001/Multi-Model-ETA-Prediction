@@ -157,6 +157,8 @@ def main():
                         help='Epoch to start SWA')
     parser.add_argument('--swa_lr', type=float, default=1e-4,
                         help='SWA learning rate')
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
+                        help='Weight decay for AdamW')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -255,7 +257,7 @@ def main():
     print(f"{variant_name} parameters: {model.count_parameters():,}")
 
     # ---- Training ----
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     if args.scheduler == 'cosine':
         from torch.optim.lr_scheduler import CosineAnnealingLR
         scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
