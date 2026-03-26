@@ -151,6 +151,12 @@ def main():
     parser.add_argument('--loss', type=str, default='huber',
                         choices=['huber', 'mse'],
                         help='Loss function')
+    parser.add_argument('--swa', action='store_true',
+                        help='Enable Stochastic Weight Averaging')
+    parser.add_argument('--swa_start', type=int, default=5,
+                        help='Epoch to start SWA')
+    parser.add_argument('--swa_lr', type=float, default=1e-4,
+                        help='SWA learning rate')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -259,6 +265,14 @@ def main():
         use_cosine = False
     criterion = nn.HuberLoss(delta=1.0) if args.loss == 'huber' else nn.MSELoss()
 
+    # SWA setup
+    swa_model = None
+    if args.swa:
+        from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
+        swa_model = AveragedModel(model)
+        swa_scheduler = SWALR(optimizer, swa_lr=args.swa_lr)
+        print(f"SWA enabled: start_epoch={args.swa_start}, swa_lr={args.swa_lr}")
+
     best_val = float('inf')
     best_state = None
     no_improve = 0
@@ -273,7 +287,10 @@ def main():
                                      device, epoch, args.epochs)
         val_loss, _, _ = evaluate(model, val_loader, criterion, device)
 
-        if use_cosine:
+        if args.swa and epoch >= args.swa_start:
+            swa_model.update_parameters(model)
+            swa_scheduler.step()
+        elif use_cosine:
             scheduler.step()
         else:
             scheduler.step(val_loss)
@@ -295,7 +312,7 @@ def main():
               f"Train={train_loss:.4f}, Val={val_loss:.4f}, "
               f"LR={lr_now:.2e}{improved}")
 
-        if no_improve >= args.patience:
+        if no_improve >= args.patience and not (args.swa and epoch < args.epochs - 1):
             print(f"  Early stopping at epoch {epoch+1}")
             break
 
@@ -304,9 +321,24 @@ def main():
     print("Evaluating best model on test set")
     print(f"{'='*60}")
 
-    model.load_state_dict(best_state)
-    model.to(device)
-    _, y_pred_norm, y_true_norm = evaluate(model, test_loader, criterion, device)
+    if swa_model is not None:
+        # Update SWA batch norm statistics
+        print("  Updating SWA batch norm statistics...")
+        from torch.optim.swa_utils import update_bn
+        update_bn(train_loader, swa_model, device=device)
+        _, y_pred_norm, y_true_norm = evaluate(swa_model, test_loader, criterion, device)
+        # Also evaluate non-SWA best for comparison
+        model.load_state_dict(best_state)
+        model.to(device)
+        _, y_pred_base, _ = evaluate(model, test_loader, criterion, device)
+        y_pred_base_h = inverse_normalize_target(y_pred_base, target_mean, target_std)
+        y_true_h = inverse_normalize_target(y_true_norm, target_mean, target_std)
+        base_mae = np.mean(np.abs(np.maximum(y_pred_base_h, 0) - y_true_h))
+        print(f"  Best-epoch MAE: {base_mae:.2f}h")
+    else:
+        model.load_state_dict(best_state)
+        model.to(device)
+        _, y_pred_norm, y_true_norm = evaluate(model, test_loader, criterion, device)
 
     y_pred = inverse_normalize_target(y_pred_norm, target_mean, target_std)
     y_true = inverse_normalize_target(y_true_norm, target_mean, target_std)
