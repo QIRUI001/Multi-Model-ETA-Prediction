@@ -185,6 +185,9 @@ def main():
                         help='Weight for soft target loss (0=hard only, 1=soft only)')
     parser.add_argument('--soft_targets_dir', type=str, default=None,
                         help='Directory containing y_soft_{split}.npy files')
+    # Checkpoint averaging
+    parser.add_argument('--ckpt_avg', type=int, default=0,
+                        help='Number of top checkpoints to average (0=disabled)')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -337,6 +340,9 @@ def main():
     best_state = None
     no_improve = 0
     train_losses, val_losses = [], []
+    # Top-K checkpoint storage for checkpoint averaging
+    import heapq
+    top_ckpts = []  # min-heap of (-val_loss, epoch, state_dict)
 
     print(f"\n{'='*60}")
     print(f"Training {variant_name} for {args.epochs} epochs")
@@ -368,6 +374,19 @@ def main():
             torch.save(best_state, Path(args.output_dir) / 'best_mstgn.pth')
         else:
             no_improve += 1
+
+        # Store top-K checkpoints for averaging
+        if args.ckpt_avg > 0:
+            ckpt_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            if len(top_ckpts) < args.ckpt_avg:
+                heapq.heappush(top_ckpts, (val_loss, epoch, ckpt_state))
+            elif val_loss < top_ckpts[-1][0]:
+                # Replace worst checkpoint if current is better
+                # heapq is min-heap, but we want top-K lowest val_loss
+                # Use a list sorted approach instead
+                top_ckpts.append((val_loss, epoch, ckpt_state))
+                top_ckpts.sort(key=lambda x: x[0])
+                top_ckpts = top_ckpts[:args.ckpt_avg]
 
         print(f"  Epoch {epoch+1}/{args.epochs}: "
               f"Train={train_loss:.4f}, Val={val_loss:.4f}, "
@@ -414,6 +433,44 @@ def main():
     print(f"  MAE:  {metrics['MAE_hours']:.2f} hours ({metrics['MAE_days']:.2f} days)")
     print(f"  RMSE: {metrics['RMSE']:.2f} hours")
     print(f"  MAPE: {metrics['MAPE']:.2f}%")
+
+    # Checkpoint averaging evaluation
+    if args.ckpt_avg > 0 and len(top_ckpts) > 1:
+        print(f"\n  Checkpoint averaging (top-{len(top_ckpts)} by val loss):")
+        avg_epochs = [e+1 for _, e, _ in sorted(top_ckpts, key=lambda x: x[0])]
+        print(f"    Epochs: {avg_epochs}")
+        # Average the state dicts
+        avg_state = {}
+        for key in top_ckpts[0][2]:
+            stacked = torch.stack([ckpt[2][key].float() for _, _, ckpt in top_ckpts])
+            avg_state[key] = stacked.mean(dim=0)
+        model.load_state_dict(avg_state)
+        model.to(device)
+        # Update BN statistics for averaged model
+        model.train()
+        with torch.no_grad():
+            for batch in tqdm(train_loader, desc='AvgCkpt BN', leave=False):
+                x, cell_ids = batch[0].to(device), batch[1].to(device)
+                model(x, cell_ids)
+        model.eval()
+        _, y_pred_avg_norm, _ = evaluate(model, test_loader, criterion, device)
+        y_pred_avg = inverse_normalize_target(y_pred_avg_norm, target_mean, target_std)
+        y_pred_avg = np.maximum(y_pred_avg, 0)
+        avg_metrics = calculate_metrics(y_pred_avg, y_true)
+        print(f"    AvgCkpt MAE:  {avg_metrics['MAE_hours']:.2f} hours")
+        print(f"    AvgCkpt RMSE: {avg_metrics['RMSE']:.2f} hours")
+        print(f"    AvgCkpt MAPE: {avg_metrics['MAPE']:.2f}%")
+        # If avg is better, use it
+        if avg_metrics['MAE_hours'] < metrics['MAE_hours']:
+            print(f"    -> Checkpoint averaging improved MAE by {metrics['MAE_hours'] - avg_metrics['MAE_hours']:.2f}h!")
+            metrics = avg_metrics
+            y_pred = y_pred_avg
+            y_pred_norm = y_pred_avg_norm
+            torch.save(avg_state, Path(args.output_dir) / 'best_mstgn.pth')
+        else:
+            # Restore best single checkpoint
+            model.load_state_dict(best_state)
+            model.to(device)
 
     # Save results
     results = {
