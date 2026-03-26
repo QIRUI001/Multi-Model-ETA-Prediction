@@ -31,7 +31,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-from src.mstgn.model import MSTGN, MSTGN_LateFusion, MSTGN_MLP, StatMLP
+from src.mstgn.model import MSTGN, MSTGN_LateFusion, MSTGN_MLP, StatMLP, MSTGN_Hybrid, HybridNoGraph
 
 
 # ============================================================
@@ -141,8 +141,8 @@ def main():
     parser.add_argument('--gru_layers', type=int, default=2)
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--variant', type=str, default='gru',
-                        choices=['gru', 'late_fusion', 'mlp', 'stat_mlp'],
-                        help='Model variant: gru (concat), late_fusion, mlp, stat_mlp (no graph)')
+                        choices=['gru', 'late_fusion', 'mlp', 'stat_mlp', 'hybrid', 'hybrid_no_graph'],
+                        help='Model variant')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -196,14 +196,20 @@ def main():
     # ---- Create model ----
     model_cls = {
         'gru': MSTGN, 'late_fusion': MSTGN_LateFusion,
-        'mlp': MSTGN_MLP, 'stat_mlp': StatMLP
+        'mlp': MSTGN_MLP, 'stat_mlp': StatMLP,
+        'hybrid': MSTGN_Hybrid, 'hybrid_no_graph': HybridNoGraph
     }[args.variant]
 
-    if args.variant == 'stat_mlp':
+    no_graph_variants = {'stat_mlp', 'hybrid_no_graph'}
+    no_gru_variants = {'mlp', 'stat_mlp'}
+
+    if args.variant in no_graph_variants:
         model_kwargs = dict(
             seq_feat_dim=train_ds.X.shape[-1],
             dropout=args.dropout,
         )
+        if args.variant not in no_gru_variants:
+            model_kwargs.update(gru_hidden=args.gru_hidden, gru_layers=args.gru_layers)
     else:
         model_kwargs = dict(
             adj_matrix=adj,
@@ -214,7 +220,7 @@ def main():
             cell_emb_dim=args.cell_emb_dim,
             dropout=args.dropout,
         )
-        if args.variant != 'mlp':
+        if args.variant not in no_gru_variants:
             model_kwargs.update(gru_hidden=args.gru_hidden, gru_layers=args.gru_layers)
     model = model_cls(**model_kwargs).to(device)
 

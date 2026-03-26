@@ -295,3 +295,123 @@ class StatMLP(nn.Module):
 
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class MSTGN_Hybrid(nn.Module):
+    """Hybrid model: GRU temporal + statistical features + graph context.
+
+    Combines three complementary information sources:
+    1. GRU: temporal patterns (acceleration, weather trends)
+    2. Statistics: tabular summaries (like XGBoost features)
+    3. Graph: spatial context from route graph
+    """
+
+    def __init__(self, adj_matrix, init_node_features,
+                 seq_feat_dim=11, seq_len=48,
+                 gcn_hidden=64, cell_emb_dim=32,
+                 gru_hidden=256, gru_layers=2,
+                 dropout=0.1):
+        super().__init__()
+
+        node_feat_dim = init_node_features.shape[1]
+
+        # Graph branch
+        self.register_buffer('adj', torch.from_numpy(adj_matrix).float())
+        self.node_features = nn.Parameter(
+            torch.from_numpy(init_node_features).float()
+        )
+        self.gcn1 = GCNLayer(node_feat_dim, gcn_hidden)
+        self.gcn2 = GCNLayer(gcn_hidden, cell_emb_dim)
+        self.gcn_drop = nn.Dropout(dropout)
+
+        # Sequence branch (raw features)
+        self.gru = nn.GRU(
+            seq_feat_dim, gru_hidden, num_layers=gru_layers,
+            batch_first=True, dropout=dropout if gru_layers > 1 else 0
+        )
+        self.attn_pool = AttentionPooling(gru_hidden)
+
+        # Fusion: temporal(gru) + stats(4*feat) + graph(2*cell_emb)
+        stat_dim = seq_feat_dim * 4
+        fusion_dim = gru_hidden + stat_dim + cell_emb_dim * 2
+        self.head = nn.Sequential(
+            nn.Linear(fusion_dim, 256),
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.Dropout(dropout),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 1)
+        )
+
+    def forward(self, x, cell_ids):
+        # Graph
+        h = self.gcn1(self.node_features, self.adj)
+        h = self.gcn_drop(h)
+        cell_emb = self.gcn2(h, self.adj)
+
+        # Temporal
+        gru_out, _ = self.gru(x)
+        seq_repr = self.attn_pool(gru_out)
+
+        # Statistical
+        last = x[:, -1, :]
+        mean = x.mean(dim=1)
+        std = x.std(dim=1)
+        diff = last - x[:, 0, :]
+        stats = torch.cat([last, mean, std, diff], dim=-1)
+
+        # Graph context
+        current_cell = cell_emb[cell_ids[:, -1]]
+        route_context = cell_emb[cell_ids].mean(dim=1)
+
+        fused = torch.cat([seq_repr, stats, current_cell, route_context], dim=-1)
+        return self.head(fused).squeeze(-1)
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class HybridNoGraph(nn.Module):
+    """GRU temporal + statistical features, no graph — ablation baseline."""
+
+    def __init__(self, seq_feat_dim=11, seq_len=48,
+                 gru_hidden=256, gru_layers=2,
+                 dropout=0.1, **kwargs):
+        super().__init__()
+
+        self.gru = nn.GRU(
+            seq_feat_dim, gru_hidden, num_layers=gru_layers,
+            batch_first=True, dropout=dropout if gru_layers > 1 else 0
+        )
+        self.attn_pool = AttentionPooling(gru_hidden)
+
+        stat_dim = seq_feat_dim * 4
+        fusion_dim = gru_hidden + stat_dim
+        self.head = nn.Sequential(
+            nn.Linear(fusion_dim, 256),
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.Dropout(dropout),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 1)
+        )
+
+    def forward(self, x, cell_ids):
+        gru_out, _ = self.gru(x)
+        seq_repr = self.attn_pool(gru_out)
+
+        last = x[:, -1, :]
+        mean = x.mean(dim=1)
+        std = x.std(dim=1)
+        diff = last - x[:, 0, :]
+        stats = torch.cat([last, mean, std, diff], dim=-1)
+
+        fused = torch.cat([seq_repr, stats], dim=-1)
+        return self.head(fused).squeeze(-1)
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
