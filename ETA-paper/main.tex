@@ -568,7 +568,7 @@ Table~\ref{tab:kd_ablation} shows the effect of the distillation mixing coeffici
 
 \begin{table}[t]
     \centering
-    \caption{Ablation: Knowledge Distillation Mixing Coefficient $\alpha$}
+    \caption{Ablation: Knowledge Distillation Configurations. Top rows: ensemble KD with varying $\alpha$. Bottom rows: alternative strategies (self-distillation uses single teacher; iterative KD uses a second-round single teacher; long training doubles epochs/patience).}
     \label{tab:kd_ablation}
     \begin{tabular}{lcccc}
         \toprule
@@ -579,6 +579,10 @@ Table~\ref{tab:kd_ablation} shows the effect of the distillation mixing coeffici
         KD $\alpha{=}0.5$ & 0.5 & 15.14 & 26.49 & 9.29 \\
         \textbf{KD $\boldsymbol{\alpha{=}0.6}$} & 0.6 & \textbf{15.13} & \textbf{26.16} & \textbf{9.33} \\
         KD $\alpha{=}0.7$ & 0.7 & 15.20 & 26.41 & 9.40 \\
+        \midrule
+        Self-distill ($\alpha{=}0.5$) & 0.5 & 15.86 & 26.49 & 9.89 \\
+        Iterative KD ($\alpha{=}0.5$) & 0.5 & 15.50 & 26.14 & 9.80 \\
+        Long training ($\alpha{=}0.6$) & 0.6 & 15.13 & 26.16 & 9.33 \\
         \bottomrule
     \end{tabular}
 \end{table}
@@ -587,6 +591,8 @@ The optimal $\alpha = 0.6$ gives slightly more weight to ensemble soft targets t
 At lower $\alpha$ (0.3), the distillation effect is minimal.
 At higher $\alpha$ (0.7), the model relies too heavily on the teacher's predictions and begins to lose the regularization benefit of ground-truth labels.
 Notably, self-distillation from a single model (using only the best MSTGN-MLP2 as teacher) yields 15.86\,h---\textit{worse} than the baseline---confirming that the diversity of the multi-seed ensemble is essential for effective KD.
+Similarly, iterative distillation (using the KD-trained model as teacher for a second round) degrades to 15.50\,h, further demonstrating that single-teacher soft targets lack the diversity needed to improve upon ensemble KD.
+Longer training (25 epochs, patience 6) exactly reproduces the standard result (15.13\,h), indicating the gain is not training-length-dependent.
 These results demonstrate that ensemble KD provides a principled way to compress ensemble knowledge into a single deployable model that surpasses XGBoost.
 
 \subsubsection{Training Dynamics}
