@@ -13,6 +13,8 @@
 \usepackage[numbers]{natbib}
 \usepackage[colorlinks=true, allcolors=blue]{hyperref}
 \usepackage{ragged2e}
+\usepackage{tikz}
+\usetikzlibrary{positioning, arrows.meta, fit, backgrounds, calc, shapes.geometric}
 \newcolumntype{P}[1]{>{\RaggedRight\arraybackslash}p{#1}}
 
 \title{Maritime Spatio-Temporal Graph Network for Vessel ETA Prediction: An Empirical Study on Trans-Pacific Routes}
@@ -128,12 +130,99 @@ The prediction system consists of two stages, as illustrated in Fig.~\ref{fig:ar
     \item \textbf{Sailing Time Prediction}: One of ten candidate models processes the input sequences to predict the remaining sailing time for the current voyage segment.
 \end{enumerate}
 
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{architecture.pdf}
-    \caption{Overview of the ETA prediction architecture. A candidate model predicts remaining sailing time from AIS sequences enriched with weather features.}
-    \label{fig:architecture}
-\end{figure}
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+    node distance=0.5cm and 0.6cm,
+    box/.style={draw, rounded corners=2pt, minimum height=0.7cm, text centered, font=\footnotesize},
+    data/.style={box, fill=blue!8, minimum width=2.0cm},
+    proc/.style={box, fill=orange!12, minimum width=2.4cm},
+    feat/.style={box, fill=green!10, minimum width=2.4cm},
+    graph/.style={box, fill=violet!10, minimum width=2.4cm},
+    fuse/.style={box, fill=yellow!15, minimum width=2.4cm},
+    outnode/.style={box, fill=red!8, minimum width=1.8cm, font=\footnotesize\bfseries},
+    kd/.style={box, fill=cyan!10, minimum width=2.4cm, dashed},
+    arr/.style={-{Stealth[length=5pt]}, thick},
+    darr/.style={-{Stealth[length=5pt]}, thick, dashed, gray},
+    lbl/.style={font=\scriptsize, text=black!70},
+]
+
+% === Row 0: Data sources ===
+\node[data] (ais) {Raw AIS Stream};
+\node[data, right=2.8cm of ais] (wx) {Weather Data};
+\node[data, right=2.8cm of wx] (graph_data) {Historical Trajectories};
+
+% === Row 1: Preprocessing ===
+\node[proc, below=0.8cm of $(ais)!0.5!(wx)$] (preproc) {\begin{tabular}{c}Voyage Extraction \& Cleaning\\\scriptsize Speed-based segmentation, filtering, normalization\end{tabular}};
+
+% === Row 2: Sequence output ===
+\node[feat, below=0.5cm of preproc, minimum width=3.2cm] (seq) {AIS Sequence ($48 \times 11$)};
+
+% Arrows: data → preproc
+\draw[arr] (ais.south) -- ++(0,-0.15) -| (preproc.north -| preproc.west);
+\draw[arr] (wx.south) -- ++(0,-0.15) -| (preproc.north -| preproc.east);
+
+\draw[arr] (preproc) -- (seq);
+
+% === Row 3: Two branches ===
+% Left: Statistical branch
+\node[feat, below left=1.2cm and 1.8cm of seq] (stat) {\begin{tabular}{c}Statistical Features\\\scriptsize 7 aggs $\times$ 11 feats = 77-d\end{tabular}};
+\node[feat, below=0.4cm of stat] (cross) {\begin{tabular}{c}Cross-Features (4-d)\\\scriptsize SOG$\times$dist, dist$^2$, \ldots\end{tabular}};
+
+% Right: Graph branch
+\node[graph, below right=1.2cm and 1.8cm of seq] (rgraph) {\begin{tabular}{c}Route Graph $\mathcal{G}(\mathcal{V}, \mathcal{E})$\\\scriptsize $2^\circ{\times}2^\circ$ grid, 1,541 nodes\end{tabular}};
+\node[graph, below=0.4cm of rgraph] (gcn) {\begin{tabular}{c}2-Layer GCN\\\scriptsize $9 \to 64 \to 32$-d embeddings\end{tabular}};
+\node[graph, below=0.4cm of gcn] (cell_emb) {\begin{tabular}{c}Cell Embeddings ($32{\times}3$)\\\scriptsize current + origin + route mean\end{tabular}};
+
+% Arrows for branches
+\draw[arr] (seq.south) -- ++(0,-0.25) -| (stat.north);
+\draw[arr] (stat) -- (cross);
+\draw[arr] (seq.south) -- ++(0,-0.25) -| (rgraph.north);
+\draw[arr] (graph_data.south) -- ++(0,-1.0) -| ([xshift=0.5cm]rgraph.east) -- (rgraph.east);
+\draw[arr] (rgraph) -- (gcn);
+\draw[arr] (gcn) -- (cell_emb);
+
+% === Row 4: Fusion ===
+\node[fuse, below=1.2cm of $(cross.south)!0.5!(cell_emb.south)$, minimum width=3.0cm] (concat) {Concatenation (81 + 96 = 177-d)};
+
+\draw[arr] (cross.south) -- ++(0,-0.2) -| (concat.north -| concat.west);
+\draw[arr] (cell_emb.south) -- ++(0,-0.2) -| (concat.north -| concat.east);
+
+% === Row 5: MLP Head ===
+\node[proc, below=0.5cm of concat] (mlp) {\begin{tabular}{c}MLP Head\\\scriptsize $512 \to 256 \to 128 \to 1$, BN, Dropout\end{tabular}};
+\draw[arr] (concat) -- (mlp);
+
+% === Row 6: Output ===
+\node[outnode, below=0.5cm of mlp] (yhat) {$\hat{y}$ (remaining hours)};
+\draw[arr] (mlp) -- (yhat);
+
+% === KD box (right side) ===
+\node[kd, right=1.5cm of mlp, minimum width=3.0cm] (ens) {\begin{tabular}{c}Teacher Ensemble\\\scriptsize Top-7 of 15 seeds (Ens7)\end{tabular}};
+\node[kd, below=0.4cm of ens, minimum width=3.0cm] (soft) {\begin{tabular}{c}Soft Targets $\hat{y}^{\text{soft}}$\\\scriptsize $\frac{1}{K}\sum_k f_k(\mathbf{x})$\end{tabular}};
+\node[kd, below=0.4cm of soft, minimum width=3.0cm] (kdloss) {\begin{tabular}{c}KD Loss\\\scriptsize $(1{-}\alpha)\cdot\text{MSE}(\hat{y},y) + \alpha\cdot\text{MSE}(\hat{y},\hat{y}^{\text{soft}})$\end{tabular}};
+
+\draw[darr] (ens) -- (soft);
+\draw[darr] (soft) -- (kdloss);
+\draw[darr] (kdloss.west) -- (yhat.east);
+
+% === Background boxes ===
+\begin{scope}[on background layer]
+    \node[draw=green!50!black, dashed, rounded corners=4pt, inner sep=8pt,
+          fit=(stat)(cross)] (stat_box) {};
+    \node[draw=violet!60!black, dashed, rounded corners=4pt, inner sep=8pt,
+          fit=(rgraph)(gcn)(cell_emb)] (graph_box) {};
+    \node[draw=cyan!60!black, dashed, rounded corners=4pt, inner sep=8pt,
+          fit=(ens)(soft)(kdloss)] (kd_box) {};
+\end{scope}
+% Labels above boxes
+\node[font=\scriptsize, text=green!50!black, above=1pt of stat_box.north, fill=white, inner sep=2pt] {Statistical Branch};
+\node[font=\scriptsize, text=violet!60!black, above=1pt of graph_box.north, fill=white, inner sep=2pt] {Spatial Branch (GCN)};
+\node[font=\scriptsize, text=cyan!60!black, above=1pt of kd_box.north, fill=white, inner sep=2pt] {Knowledge Distillation};
+
+\end{tikzpicture}
+\caption{Architecture of the proposed MSTGN-KD system. Raw AIS and weather data are preprocessed into 48-step sequences. The statistical branch extracts 81 aggregated features plus 4 cross-features; the spatial branch constructs a route graph and produces GCN cell embeddings. Both are fused and fed through an MLP head. During training, an ensemble teacher provides soft targets via knowledge distillation (dashed lines).}
+\label{fig:architecture}
+\end{figure*}
 
 \subsection{Input Representation}
 
