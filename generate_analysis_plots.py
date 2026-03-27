@@ -46,8 +46,9 @@ def generate_plots(y_pred: np.ndarray, y_true: np.ndarray, save_dir: Path, model
 
     # ── (b) MAE by Remaining Time (true) ──
     ax = axes[0, 1]
-    # Bin by true remaining hours in 24h (1-day) bins
-    bin_edges = np.arange(0, y_true.max() + 24, 24)
+    # Bin by true remaining hours in 24h (1-day) bins, cap at 25 days
+    max_hours_for_bin = min(y_true.max(), 600)  # ~25 days cap
+    bin_edges = np.arange(0, max_hours_for_bin + 24, 24)
     bin_maes, bin_counts, bin_centers = [], [], []
     for i in range(len(bin_edges) - 1):
         mask = (y_true >= bin_edges[i]) & (y_true < bin_edges[i + 1])
@@ -60,11 +61,6 @@ def generate_plots(y_pred: np.ndarray, y_true: np.ndarray, save_dir: Path, model
     bin_centers_days = np.array(bin_centers) / 24
     bars = ax.bar(bin_centers_days, bin_maes, width=0.85, color='#4C72B0',
                   edgecolor='white', linewidth=0.6, alpha=0.85)
-    # Annotate sample counts
-    for bar, cnt in zip(bars, bin_counts):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
-                f'{cnt // 1000}k' if cnt >= 1000 else str(cnt),
-                ha='center', va='bottom', fontsize=6, color='#555555')
     ax.set_xlabel('True Remaining Time (days)', fontsize=10)
     ax.set_ylabel('MAE (hours)', fontsize=10)
     ax.set_title('(b) MAE by True Remaining Time', fontsize=11, fontweight='bold')
