@@ -34,6 +34,7 @@ First, we conduct a systematic empirical comparison of ten forecasting models sp
 Second, we propose MSTGN (Maritime Spatio-Temporal Graph Network), which constructs a route graph over ocean grid cells and uses Graph Convolutional Networks (GCN) to learn spatial context for ETA prediction.
 Our results reveal that while XGBoost achieves strong single-model performance (MAE = 15.14\,h), our proposed MSTGN with enriched statistical features and GCN-derived spatial embeddings achieves competitive single-model accuracy (MAE = 15.13\,h) through ensemble knowledge distillation, surpassing XGBoost without requiring multiple inference-time models.
 Ablation studies show that statistical feature engineering is the dominant factor in prediction quality, while knowledge distillation from a multi-seed ensemble effectively transfers collective knowledge into a single compact model.
+A detailed large-deviation analysis reveals that 96\% of extreme errors ($>$100\,h) are underestimates concentrated in ultra-long voyages, stemming from log-space target compression and data imbalance; we evaluate remediation strategies including label distribution smoothing and post-hoc calibration, achieving up to 5\% relative reduction in tail errors.
 These findings reveal that for single-step vessel ETA prediction, compact statistical features combined with spatial graph context and knowledge distillation provide an effective and elegant approach that surpasses gradient-boosted tree baselines.
 \end{abstract}
 
@@ -64,6 +65,7 @@ Our main contributions are:
     \item A novel Maritime Spatio-Temporal Graph Network (MSTGN) that constructs a route graph over ocean grid cells and fuses GCN-derived spatial context with enriched statistical features, achieving competitive single-model performance through knowledge distillation (MAE = 15.13\,h), surpassing XGBoost (15.14\,h) without ensemble inference.
     \item An ensemble knowledge distillation framework that trains a multi-seed teacher ensemble (15 models, top-7 achieving MAE = 14.95\,h) and distills its knowledge into a single student model that retains virtually all of the ensemble's advantage.
     \item Ablation studies demonstrating that (a) statistical feature engineering is the dominant factor, (b) temporal sequence modeling adds limited value, and (c) incorporating meteorological features yields a 7.1\% MAE improvement.
+    \item A large-deviation analysis identifying that 96\% of extreme prediction errors ($>$100\,h) are systematic underestimates concentrated in ultra-long voyages, with evaluation of remediation strategies achieving up to 5\% relative tail error reduction.
     \item A decoupled prediction architecture that separately models sailing time and port-dwell time, reflecting their distinct underlying dynamics.
 \end{enumerate}
 
@@ -609,15 +611,88 @@ Early stopping triggers at epoch 5 (patience = 3).
 \end{figure}
 
 
-\subsection{Error Analysis}
+\subsection{Large Deviation Analysis}
+\label{sec:large_dev}
 
-To understand prediction failures, we analyze test samples where the absolute error exceeds 200 hours.
-These ``bad cases'' predominantly involve:
-(1) extremely long-haul voyages ($>500$ hours) where small relative errors translate to large absolute errors;
-(2) voyages with anomalous speed profiles (e.g., prolonged slow steaming or mid-ocean stops);
-and (3) voyages with missing or zero-valued weather features.
+While overall MAE captures mean performance, practical deployment requires understanding \textit{tail behavior}---the frequency and severity of large prediction errors.
+We define a ``large deviation'' as $|\hat{y} - y| > 100$\,h (approximately 4 days), corresponding roughly to the 99th percentile of absolute error.
+Table~\ref{tab:large_dev_profile} profiles these deviations across voyage duration bins.
 
-The MAE-by-sailing-day analysis reveals that prediction accuracy is highest during the first few days of a voyage and degrades for predictions made very early (when more uncertainty remains about the vessel's routing and speed profile).
+\begin{table}[t]
+    \centering
+    \caption{Large deviation profile by true remaining voyage duration. The rate denotes the fraction of samples in each bin with $|\text{error}| > 100$\,h.}
+    \label{tab:large_dev_profile}
+    \begin{tabular}{lrrrr}
+        \toprule
+        \textbf{Duration bin} & \textbf{Samples} & \textbf{MAE (h)} & \textbf{$>$100\,h rate} \\
+        \midrule
+        $[0, 24)$\,h     & 324,006  & 2.45  & 0.000\% \\
+        $[24, 72)$\,h    & 409,819  & 6.52  & 0.045\% \\
+        $[72, 168)$\,h   & 743,545  & 10.66 & 0.225\% \\
+        $[168, 336)$\,h  & 980,279  & 19.71 & 1.649\% \\
+        $[336, 504)$\,h  & 384,803  & 28.48 & 3.270\% \\
+        $[504, 720)$\,h  & 17,436   & 92.06 & \textbf{36.24\%} \\
+        \midrule
+        \textbf{Overall}  & 2,859,888 & 15.13 & 1.291\% \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Three structural factors explain the concentration of large deviations in ultra-long voyages ($\geq 504$\,h, $< 1\%$ of data):
+
+\textbf{(1)~Log-space compression.}
+Since training targets are $\tilde{y} = (\ln(1+y) - \mu) / \sigma$, equal errors in log-space correspond to exponentially different errors in hours-space.
+A 0.1 log-space error at $y_{\text{true}} = 100$\,h translates to ${\sim}12$\,h, but at $y_{\text{true}} = 500$\,h it translates to ${\sim}67$\,h.
+
+\textbf{(2)~Regression to the mean.}
+Underrepresented long-duration samples exert minimal gradient influence, so the model's predictions regress toward the population mean.
+The max prediction is 590\,h versus a true max of 674\,h, confirming a prediction ceiling.
+96.4\% of large deviations are \textit{underestimates}.
+
+\textbf{(3)~Feature saturation.}
+For voyages $> 500$\,h, the discriminative features (distance-to-destination, bearing difference) have saturated---all such voyages start far from port---leaving insufficient signal to distinguish a 504\,h voyage from a 670\,h voyage.
+
+\subsubsection{Remediation Strategies}
+\label{sec:remediation}
+
+We evaluate three principled remediation approaches, summarized in Table~\ref{tab:remediation}.
+
+\begin{table}[t]
+    \centering
+    \caption{Remediation strategies for large deviations. LDS = Label Distribution Smoothing~\cite{yang2021lds}. Calibration uses isotonic regression on a 30\% held-out calibration set. All methods use MSTGN-MLP2 + KD~$\alpha{=}0.6$ as the base model.}
+    \label{tab:remediation}
+    \begin{tabular}{lccc}
+        \toprule
+        \textbf{Method} & \textbf{MAE (h)} & \textbf{RMSE (h)} & \textbf{$>$100\,h rate} \\
+        \midrule
+        Baseline (KD $\alpha{=}0.6$) & \textbf{15.13} & 26.16 & 1.291\% \\
+        \midrule
+        \multicolumn{4}{l}{\textit{Training-time strategies}} \\
+        \quad Inv.\ density weighting & 15.54 & 26.10 & \textbf{1.237\%} \\
+        \quad LDS weighting          & 15.17 & \textbf{26.00} & 1.262\% \\
+        \quad Dual-space loss ($\beta{=}0.3$) & 15.38 & 26.05 & 1.271\% \\
+        \midrule
+        \multicolumn{4}{l}{\textit{Post-hoc calibration}} \\
+        \quad Isotonic regression     & 15.63 & --- & 1.240\% \\
+        \quad LDS + Isotonic          & 15.56 & --- & \textbf{1.226\%} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\textbf{Sample reweighting} up-weights underrepresented duration bins during training.
+Inverse-density weighting assigns the $[504, 720)$\,h bin a weight of $5.0\times$, achieving the best single-strategy large deviation rate (1.237\%) but at a 0.41\,h MAE cost.
+LDS~\cite{yang2021lds} uses kernel-smoothed density estimation, giving weights of $5.9\times$ for the tail bin while maintaining smoother gradients.
+LDS offers the best trade-off: only 0.04\,h MAE increase, 0.16\,h RMSE \textit{improvement}, and 2.2\% relative large-deviation reduction.
+
+\textbf{Dual-space loss} adds an hours-space MAE term:
+$\mathcal{L} = (1{-}\beta) \cdot \text{MSE}_{\text{log}} + \beta \cdot \text{MAE}_{\text{hours}} / 100$.
+With $\beta = 0.3$, this reduces the $[504, 720)$\,h bin rate from 36.2\% to 32.0\%, but increases overall MAE.
+
+\textbf{Post-hoc calibration} fits isotonic regression on a held-out calibration set.
+Combined with LDS training, this two-stage approach achieves the lowest large-deviation rate (1.226\%, a 5.0\% relative reduction) but at 0.43\,h MAE cost.
+
+The consistent finding across all strategies is that reducing tail errors for the $< 1\%$ of ultra-long voyages requires shifting predictions upward, which necessarily degrades accuracy for the $> 99\%$ of shorter voyages.
+This MAE--reliability trade-off is a fundamental consequence of the skewed voyage duration distribution and the log-space training objective, and suggests that \textbf{practical deployment should adopt duration-aware confidence intervals rather than seeking a single point estimator} that satisfies both the head and the tail of the distribution.
 
 
 %==============================================================
@@ -818,6 +893,9 @@ J.~H.~Yoon, D.~H.~Kim, S.~W.~Yun, H.~J.~Kim, and S.~Kim, ``Enhancing Container V
 
 \bibitem{yuShipArrivalPrediction2018}
 J.~Yu, G.~Tang, X.~Song, X.~Yu, Y.~Qi, D.~Li, and Y.~Zhang, ``Ship Arrival Prediction and Its Value on Daily Container Terminal Operation,'' \textit{Ocean Engineering}, vol.~157, pp.~73--86, 2018. doi: 10.1016/j.oceaneng.2018.03.038.
+
+\bibitem{yang2021lds}
+Y.~Yang, K.~Zha, Y.~Chen, H.~Wang, and D.~Katabi, ``Delving into Deep Imbalanced Regression,'' in \textit{Proc.\ International Conference on Machine Learning (ICML)}, 2021, pp.~11842--11855.
 
 \end{thebibliography}
 
