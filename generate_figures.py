@@ -141,10 +141,10 @@ def draw_baseline_comparison():
     # Results grouped by family (excluding Ridge for main chart)
     models = ['MLP', 'LSTM', 'GRU', '1D-CNN', 'TCN', 'XGBoost', 
               'Transformer', 'Conv-Trans.', 'Informer',
-              'MSTGN-MLP', 'StatMLP', 'MSTGN-Late', 'MSTGN-Ens7']
+              'MSTGN-MLP', 'StatMLP', 'MSTGN-Late', 'MSTGN-MLP2', 'MSTGN-KD', 'MSTGN-Ens7']
     maes = [15.73, 15.79, 16.03, 16.08, 17.19, 15.14, 
             18.12, 16.60, 16.20,
-            15.40, 15.41, 15.56, 14.95]
+            15.40, 15.41, 15.56, 15.28, 15.13, 14.95]
     
     # Color by family
     family_colors = {
@@ -157,7 +157,7 @@ def draw_baseline_comparison():
     }
     families = ['Feedforward', 'Recurrent', 'Recurrent', 'Convolutional', 'Convolutional',
                 'Tree', 'Attention', 'Attention', 'Attention',
-                'Graph', 'Graph', 'Graph', 'Graph']
+                'Graph', 'Graph', 'Graph', 'Graph', 'Graph', 'Graph']
     colors = [family_colors[f] for f in families]
     
     # Sort by MAE for visual clarity
@@ -181,8 +181,8 @@ def draw_baseline_comparison():
         ax.text(v + 0.05, i, f'{v:.2f}h', va='center', fontsize=8)
     
     # Best single model line
-    ax.axvline(x=15.14, color='#C62828', linestyle='--', alpha=0.5, linewidth=1)
-    ax.text(15.20, len(models_sorted) - 0.3, 'Best single (XGBoost)', fontsize=7, color='#C62828', alpha=0.7)
+    ax.axvline(x=15.13, color='#C62828', linestyle='--', alpha=0.5, linewidth=1)
+    ax.text(15.19, len(models_sorted) - 0.3, 'Best single (MSTGN-KD)', fontsize=7, color='#C62828', alpha=0.7)
     
     # Legend for families
     legend_handles = [mpatches.Patch(facecolor=c, edgecolor='#424242', label=f) 

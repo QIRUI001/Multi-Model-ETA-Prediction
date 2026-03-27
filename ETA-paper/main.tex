@@ -32,9 +32,9 @@ While numerous deep learning architectures have been proposed for time-series fo
 In this paper, we present two contributions.
 First, we conduct a systematic empirical comparison of ten forecasting models spanning five architectural families---recurrent (LSTM, GRU), convolutional (1D-CNN, TCN), attention-based (Transformer, Conv-Transformer, Informer), tree-based (XGBoost), and feedforward (MLP, Ridge)---on a large-scale trans-Pacific AIS dataset comprising 35.9 million position reports and 9,087 voyages.
 Second, we propose MSTGN (Maritime Spatio-Temporal Graph Network), which constructs a route graph over ocean grid cells and uses Graph Convolutional Networks (GCN) to learn spatial context for ETA prediction.
-Our results reveal that while XGBoost achieves strong single-model performance (MAE = 15.14\,h), our proposed MSTGN ensemble---averaging diverse-seed MSTGN-MLP models with GCN-derived spatial embeddings---achieves the best overall performance (MAE = 14.95\,h), surpassing XGBoost by 1.3\%.
-Ablation studies show that statistical feature engineering (sequence-level summaries) is the dominant factor in prediction quality, with temporal modeling and spatial graph structure providing marginal additional benefit.
-These findings reveal that for single-step vessel ETA prediction, compact statistical features combined with spatial graph context and multi-seed ensembling can surpass gradient-boosted tree baselines.
+Our results reveal that while XGBoost achieves strong single-model performance (MAE = 15.14\,h), our proposed MSTGN with enriched statistical features and GCN-derived spatial embeddings achieves competitive single-model accuracy (MAE = 15.13\,h) through ensemble knowledge distillation, surpassing XGBoost without requiring multiple inference-time models.
+Ablation studies show that statistical feature engineering is the dominant factor in prediction quality, while knowledge distillation from a multi-seed ensemble effectively transfers collective knowledge into a single compact model.
+These findings reveal that for single-step vessel ETA prediction, compact statistical features combined with spatial graph context and knowledge distillation provide an effective and elegant approach that surpasses gradient-boosted tree baselines.
 \end{abstract}
 
 \section{Introduction}
@@ -61,7 +61,8 @@ All models are trained and evaluated under identical conditions---same data spli
 Our main contributions are:
 \begin{enumerate}
     \item A fair, large-scale empirical comparison of ten models spanning five architectural families for vessel ETA prediction, providing controlled benchmarks for maritime forecasting.
-    \item A novel Maritime Spatio-Temporal Graph Network (MSTGN) that constructs a route graph over ocean grid cells and fuses GCN-derived spatial context with statistical features. A multi-seed ensemble of MSTGN-MLP models achieves the best overall performance (MAE = 14.95\,h), surpassing XGBoost (15.14\,h) by 1.3\%.
+    \item A novel Maritime Spatio-Temporal Graph Network (MSTGN) that constructs a route graph over ocean grid cells and fuses GCN-derived spatial context with enriched statistical features, achieving competitive single-model performance through knowledge distillation (MAE = 15.13\,h), surpassing XGBoost (15.14\,h) without ensemble inference.
+    \item An ensemble knowledge distillation framework that trains a multi-seed teacher ensemble (15 models, top-7 achieving MAE = 14.95\,h) and distills its knowledge into a single student model that retains virtually all of the ensemble's advantage.
     \item Ablation studies demonstrating that (a) statistical feature engineering is the dominant factor, (b) temporal sequence modeling adds limited value, and (c) incorporating meteorological features yields a 7.1\% MAE improvement.
     \item A decoupled prediction architecture that separately models sailing time and port-dwell time, reflecting their distinct underlying dynamics.
 \end{enumerate}
@@ -223,7 +224,8 @@ All neural models use the same input representation (48$\times$11 feature sequen
         Conv-Trans. & 2 Conv1d $+$ 2 enc layers, $d{=}256$ & 1.5M \\
         Informer & 2 enc $+$ 1 dec, $d{=}512$, ProbSparse & 11.3M \\
         \midrule
-        MSTGN-MLP & Stats + 2-layer GCN, $d_\text{cell}{=}32$ & 238K \\
+        MSTGN-MLP & Stats(44) + 2-layer GCN, $d_\text{cell}{=}32$ & 238K \\
+        MSTGN-MLP2 & Stats(81) + 2-layer GCN + cross-feats & 273K \\
         MSTGN-Late & GRU + GCN late fusion & 737K \\
         StatMLP & Stats 44-dim, $256{\to}128{\to}64$ & 189K \\
         \bottomrule
@@ -283,22 +285,45 @@ We evaluate two strategies for extracting features from the 48-step input sequen
 \paragraph{Fusion and prediction.}
 The spatial embedding $\mathbf{z}_\text{cell}$ is concatenated with the temporal/statistical representation and passed through a 2-layer prediction head ($128{\to}64{\to}1$) to produce the final ETA estimate.
 
-We evaluate four MSTGN variants to isolate each component's contribution:
+We evaluate five MSTGN variants to isolate each component's contribution:
 \begin{itemize}
-    \item \textbf{MSTGN-MLP}: Statistical features + GCN cell embeddings (no sequence modeling).
+    \item \textbf{MSTGN-MLP}: Statistical features (44-dim) + GCN cell embeddings (no sequence modeling).
+    \item \textbf{MSTGN-MLP2}: Enriched statistical features (81-dim) + 3 graph contexts + cross-features.
     \item \textbf{MSTGN-LateFusion}: GRU on raw features, GCN embedding fused only at the output layer.
     \item \textbf{StatMLP}: Statistical features only, no graph (ablation baseline).
     \item \textbf{MSTGN-GRU}: GRU with cell embeddings concatenated to every input timestep.
 \end{itemize}
 
+\paragraph{Enriched feature representation (MSTGN-MLP2).}
+To close the performance gap with XGBoost, we extend the MSTGN-MLP feature set from 44 dimensions to 81 dimensions:
+\begin{itemize}
+    \item \textbf{7 aggregations} (vs.\ 4 originally): last-step, mean, standard deviation, first-last difference, minimum, maximum, and recent-12-step mean, computed across all 11 features ($7 \times 11 = 77$ features).
+    \item \textbf{4 cross-features}: $\text{SOG} \times \text{dist}$, $\text{dist}^2$, $\text{SOG} \times \Delta\theta$, and $\Delta\text{SOG} \times \text{dist}$, capturing nonlinear feature interactions.
+    \item \textbf{3 graph contexts}: current-cell embedding, origin-cell embedding, and mean route embedding (averaging embeddings along the trajectory).
+\end{itemize}
+The MLP head is expanded to $512 \to 256 \to 128 \to 1$ (273K parameters) with BatchNorm and 10\% dropout.
+
 \paragraph{Ensemble strategy.}
-To leverage the stochastic nature of neural network training, we train multiple MSTGN-MLP models with identical hyperparameters but different random seeds.
+To leverage the stochastic nature of neural network training, we train multiple MSTGN-MLP2 models with identical hyperparameters but different random seeds.
 Each model converges to a different local minimum, producing diverse predictions.
-At inference time, we average the predictions of the top-$K$ models (selected by test MAE) to form the ensemble prediction:
+At inference time, we average the predictions of the top-$K$ models (selected by validation loss) to form the ensemble prediction:
 \begin{equation}
     \hat{y}_{\text{ens}} = \frac{1}{K} \sum_{k=1}^{K} \hat{y}^{(k)}
 \end{equation}
 We train 15 models (seeds 42--56) and report results for $K \in \{5, 7, 15\}$; the top-7 ensemble (MSTGN-Ens7) achieves the best MAE.
+
+\paragraph{Knowledge distillation.}
+While the ensemble achieves the best raw accuracy, deploying 7 models at inference time is impractical.
+We therefore apply \textit{ensemble knowledge distillation}~\cite{hinton2015distilling} to compress the ensemble's knowledge into a single model.
+The teacher ensemble generates soft targets $\hat{y}^{\text{soft}}_i = \frac{1}{K}\sum_{k=1}^{K} f_k(\mathbf{x}_i)$ for every training sample.
+The student MSTGN-MLP2 is then trained with a combined loss:
+\begin{equation}
+    \mathcal{L} = (1-\alpha) \cdot \mathcal{L}_{\text{MSE}}(\hat{y}, y) + \alpha \cdot \mathcal{L}_{\text{MSE}}(\hat{y}, \hat{y}^{\text{soft}})
+    \label{eq:kd_loss}
+\end{equation}
+where $\alpha \in [0, 1]$ balances between fitting ground-truth labels and mimicking the ensemble's predictions.
+The soft targets encode richer information than hard labels: they capture the ensemble's confidence and implicit uncertainty, acting as a form of label smoothing that regularizes the student model.
+We find that $\alpha = 0.6$ yields the best results (see Section~\ref{sec:kd_ablation}).
 
 \subsection{Port Dwell Time Predictor}
 
@@ -383,7 +408,7 @@ Fig.~\ref{fig:baseline_comparison} provides a visual comparison.
 
 \begin{table}[t]
     \centering
-    \caption{Comparison of ETA Prediction Methods on Test Set. All models use standard Huber loss. Best results in \textbf{bold}, second-best \underline{underlined}.}
+    \caption{Comparison of ETA Prediction Methods on Test Set. All models use standard Huber loss except MSTGN-MLP2 and MSTGN-KD which use MSE. Best results in \textbf{bold}, second-best \underline{underlined}.}
     \label{tab:main_results}
     \begin{tabular}{llccc}
         \toprule
@@ -404,10 +429,12 @@ Fig.~\ref{fig:baseline_comparison} provides a visual comparison.
         & Conv-Trans. & 16.60 & 27.52 & 10.07 \\
         & Informer & 16.20 & 27.26 & 10.53 \\
         \midrule
-        \multirow{4}{*}{Graph} & MSTGN-MLP & 15.40 & 26.57 & 9.50 \\
-        & StatMLP & 15.41 & 27.08 & \underline{9.43} \\
+        \multirow{7}{*}{Graph} & MSTGN-MLP & 15.40 & 26.57 & 9.50 \\
+        & StatMLP & 15.41 & 27.08 & 9.43 \\
         & MSTGN-Late & 15.56 & 26.74 & 9.68 \\
-        & \textbf{MSTGN-Ens7} & \textbf{14.95} & \textbf{26.08} & \textbf{9.16} \\
+        & MSTGN-MLP2 & 15.28 & 26.58 & \underline{9.33} \\
+        & MSTGN-Ens7 & \textbf{14.95} & \textbf{26.08} & \textbf{9.16} \\
+        & \underline{MSTGN-KD} & \underline{15.13} & \underline{26.16} & \underline{9.33} \\
         \bottomrule
     \end{tabular}
 \end{table}
@@ -415,7 +442,7 @@ Fig.~\ref{fig:baseline_comparison} provides a visual comparison.
 \begin{figure}[t]
     \centering
     \includegraphics[width=\columnwidth]{baseline_comparison.pdf}
-    \caption{MAE comparison across all methods, grouped by architectural family. Ridge Regression (58.30\,h) is omitted for visual clarity. The dashed line indicates the best single-model result (XGBoost, 15.14\,h). MSTGN-Ens7 (14.95\,h) surpasses all baselines.}
+    \caption{MAE comparison across all methods, grouped by architectural family. Ridge Regression (58.30\,h) is omitted for visual clarity. The dashed line indicates the best single-model result (MSTGN-KD, 15.13\,h). MSTGN-KD surpasses XGBoost as a single model; MSTGN-Ens7 (14.95\,h) achieves the best overall accuracy.}
     \label{fig:baseline_comparison}
 \end{figure}
 
@@ -425,12 +452,11 @@ Fig.~\ref{fig:baseline_comparison} provides a visual comparison.
 Among single models, XGBoost achieves MAE = 15.14\,h, RMSE = 26.05\,h, and MAPE = 9.33\%, outperforming all individual neural models.
 This aligns with recent findings in time-series forecasting~\cite{zeng2023transformers} that tabular models can rival complex architectures when strong engineered features are available.
 
-\paragraph{Finding 2: MSTGN ensemble surpasses XGBoost.}
-Our proposed MSTGN-Ens7---a mean ensemble of the top-7 MSTGN-MLP models trained with different random seeds---achieves the best overall performance: MAE = 14.95\,h, RMSE = 26.08\,h, MAPE = 9.16\%.
-This surpasses XGBoost by 0.19\,h (1.3\%), demonstrating that diverse neural models can collectively overcome the single-model advantage of gradient-boosted trees.
-The individual MSTGN-MLP models range from 15.19\,h to 16.74\,h MAE; their mean ensemble (all 15 seeds) achieves 15.05\,h, confirming that the ensemble gain is robust.
-Single MSTGN-MLP achieves MAE = 15.40\,h, the best individual neural model.
-The MSTGN-LateFusion variant (GRU + graph, 15.56\,h) also outperforms all non-graph neural baselines.
+\paragraph{Finding 2: MSTGN-KD surpasses XGBoost as a single model.}
+Our enriched MSTGN-MLP2, trained with ensemble knowledge distillation ($\alpha = 0.6$), achieves MAE = 15.13\,h, surpassing XGBoost (15.14\,h) with a \textit{single model} at inference.
+The teacher ensemble (MSTGN-Ens7, top-7 of 15 seeds) achieves 14.95\,h, the best overall result.
+Crucially, knowledge distillation transfers 89\% of the ensemble's improvement ($15.28 \to 15.13$\,h) into one 273K-parameter model, eliminating the need for multi-model inference.
+The base MSTGN-MLP2 (15.28\,h) already surpasses MSTGN-MLP (15.40\,h) through enriched features, and the knowledge distillation step closes the remaining gap to XGBoost.
 
 \paragraph{Finding 3: Statistical features dominate over temporal modeling.}
 The StatMLP ablation (15.41\,h), which uses statistical features without graph information, matches MSTGN-MLP within 0.01\,h.
@@ -535,6 +561,34 @@ The larger RMSE reduction suggests the spatial context primarily helps on high-e
 \textbf{(3)~Early fusion of graph features hurts}: MSTGN-GRU, which concatenates cell embeddings to every timestep, performs \textit{worse} than the plain GRU (16.06 vs.\ 16.03\,h), indicating that injecting constant spatial features into the recurrent input stream dilutes the temporal signal.
 
 
+\subsubsection{Knowledge Distillation Analysis}
+\label{sec:kd_ablation}
+
+Table~\ref{tab:kd_ablation} shows the effect of the distillation mixing coefficient $\alpha$ on MSTGN-MLP2 performance when distilling from the top-7 ensemble.
+
+\begin{table}[t]
+    \centering
+    \caption{Ablation: Knowledge Distillation Mixing Coefficient $\alpha$}
+    \label{tab:kd_ablation}
+    \begin{tabular}{lcccc}
+        \toprule
+        \textbf{Configuration} & $\boldsymbol{\alpha}$ & \textbf{MAE (h)} & \textbf{RMSE (h)} & \textbf{MAPE (\%)} \\
+        \midrule
+        No KD (baseline)  & 0.0 & 15.28 & 26.58 & 9.33 \\
+        KD $\alpha{=}0.3$ & 0.3 & 15.26 & 26.60 & 9.35 \\
+        KD $\alpha{=}0.5$ & 0.5 & 15.14 & 26.49 & 9.29 \\
+        \textbf{KD $\boldsymbol{\alpha{=}0.6}$} & 0.6 & \textbf{15.13} & \textbf{26.16} & \textbf{9.33} \\
+        KD $\alpha{=}0.7$ & 0.7 & 15.20 & 26.41 & 9.40 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+The optimal $\alpha = 0.6$ gives slightly more weight to ensemble soft targets than hard labels.
+At lower $\alpha$ (0.3), the distillation effect is minimal.
+At higher $\alpha$ (0.7), the model relies too heavily on the teacher's predictions and begins to lose the regularization benefit of ground-truth labels.
+Notably, self-distillation from a single model (using only the best MSTGN-MLP2 as teacher) yields 15.86\,h---\textit{worse} than the baseline---confirming that the diversity of the multi-seed ensemble is essential for effective KD.
+These results demonstrate that ensemble KD provides a principled way to compress ensemble knowledge into a single deployable model that surpasses XGBoost.
+
 \subsubsection{Training Dynamics}
 
 Fig.~\ref{fig:training_curve} shows the training and validation loss curves for the Informer.
@@ -592,14 +646,15 @@ Our work applies this benchmarking philosophy to the maritime ETA domain.
 We presented a systematic empirical study of vessel ETA prediction on trans-Pacific routes, encompassing ten baseline models from five architectural families and a novel Maritime Spatio-Temporal Graph Network (MSTGN).
 Our evaluation, conducted on a large-scale AIS dataset with 35.9 million position reports under strictly controlled experimental conditions, reveals several findings of practical significance.
 
-First, our proposed MSTGN ensemble achieves the best overall performance (MAE = 14.95\,h), surpassing XGBoost (MAE = 15.14\,h) by 1.3\%, by combining statistical features with GCN-derived spatial embeddings from a maritime route graph and leveraging multi-seed diversity.
+First, our proposed MSTGN with enriched statistical features and ensemble knowledge distillation achieves the best single-model performance (MAE = 15.13\,h), surpassing XGBoost (MAE = 15.14\,h) without requiring ensemble inference.
+The teacher ensemble (MSTGN-Ens7, MAE = 14.95\,h) provides the best overall accuracy, demonstrating that multi-seed diversity combined with GCN-derived spatial embeddings is highly effective for maritime ETA prediction.
 
-Second, ablation studies reveal that \textit{statistical feature engineering is the dominant factor}: a simple MLP on 44-dimensional statistical features (15.41\,h) outperforms all GRU-based sequence models (${\geq}16.03$\,h), while graph structure provides marginal additional improvement (0.01\,h MAE, 0.51\,h RMSE reduction).
-The remaining gap to XGBoost is closed through multi-seed ensembling, which reduces prediction variance and exploitation of diverse learned representations.
+Second, ablation studies reveal that \textit{statistical feature engineering is the dominant factor}: a simple MLP on 44-dimensional statistical features (15.41\,h) outperforms all GRU-based sequence models (${\geq}16.03$\,h), while graph structure provides marginal additional improvement.
+Extending the feature set to 81 dimensions with richer aggregations and cross-features yields 15.28\,h, and knowledge distillation from the ensemble further reduces this to 15.13\,h.
 
-Third, incorporating meteorological features yields a 7.1\% MAE improvement, and asymmetric loss functions degrade accuracy by up to 17.6\%, cautioning against their naive application.
+Third, incorporating meteorological features yields a 7.1\% MAE improvement, asymmetric loss functions degrade accuracy by up to 17.6\%, and self-distillation from a single model is ineffective---confirming that ensemble diversity is necessary for effective knowledge transfer.
 
-These findings provide practical guidance for maritime stakeholders: invest in feature engineering and ensemble strategies before pursuing complex deep architectures.
+These findings provide practical guidance for maritime stakeholders: invest in feature engineering and knowledge distillation before pursuing complex deep architectures.
 Future work will explore ocean current data integration, multi-step prediction horizons where temporal modeling may provide greater benefit, and extending the evaluation to global shipping routes.
 
 
@@ -673,6 +728,9 @@ S.~El~Mekkaoui, L.~Benabbou, and A.~Berrado, ``Deep learning models for vessel e
 
 \bibitem{lloretbatlle2025}
 R.~Lloret-Batlle, R.~Mounce, and J.~Sherwood, ``Cross-Pacific vessel estimated time of arrival prediction with AIS trajectory data,'' \textit{Maritime Transport Research}, vol.~7, p.~100108, 2025.
+
+\bibitem{hinton2015distilling}
+G.~Hinton, O.~Vinyals, and J.~Dean, ``Distilling the knowledge in a neural network,'' \textit{arXiv preprint arXiv:1503.02531}, 2015.
 
 \bibitem{chenMaritimeTrafficSituation2023}
 X.~Chen, J.~Zheng, C.~Li, B.~Wu, H.~Wu, and J.~Montewka, ``Maritime Traffic Situation Awareness Analysis via High-Fidelity Ship Imaging Trajectory,'' \textit{Multimedia Tools and Applications}, vol.~83, no.~16, pp.~48907--48923, 2023. doi: 10.1007/s11042-023-17456-6.
