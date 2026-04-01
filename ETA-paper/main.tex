@@ -348,6 +348,13 @@ Each node $v \in \mathcal{V}$ is assigned a 9-dimensional feature vector: mean S
 
 The MSTGN processes the route graph and input trajectory through two parallel branches that are fused for the final prediction.
 
+\paragraph{Design philosophy.}
+We emphasize that MSTGN is best understood as a \textit{graph-augmented statistical feature fusion model} rather than an end-to-end deep spatio-temporal network in the vein of ST-GCN or ASTGCN~\cite{daiHybridSpatiotemporalGraph2020}.
+The GCN component does not model sequential propagation of vessel state across the graph; instead, it produces a static lookup table of spatial context embeddings that are appended to statistical features at prediction time.
+This design choice reflects an empirical finding discussed in Section~\ref{sec:graph_ablation}: for single-step ETA regression with a compact input window, compact spatial context features outperform complex end-to-end spatial-temporal architectures.
+The contribution of MSTGN is thus correctly attributed to three separable sources: (1)~\textit{statistical feature engineering} as the dominant factor, (2)~\textit{graph-derived spatial context} as a consistent but marginal supplementary signal, and (3)~\textit{ensemble knowledge distillation} as a principled compression strategy.
+We design ablation experiments in Section~\ref{sec:ablations} to quantify each of these contributions, including a direct comparison of XGBoost with GCN embeddings to isolate the contribution of the neural fusion head.
+
 \paragraph{Spatial branch (GCN).}
 A two-layer Graph Convolutional Network~\cite{kipf2017gcn} produces cell embeddings from the route graph:
 \begin{equation}
@@ -614,6 +621,7 @@ Our ensemble knowledge distillation framework compresses a 15-seed teacher ensem
 
 
 \subsection{Ablation Studies}
+\label{sec:ablations}
 
 \subsubsection{Effect of Weather Features}
 
@@ -673,6 +681,7 @@ We report this finding to caution practitioners against applying asymmetric loss
 
 
 \subsubsection{Ablation: Graph and Temporal Components}
+\label{sec:graph_ablation}
 
 To disentangle the contributions of spatial graph structure, temporal sequence modeling, and statistical features, we conduct a component ablation study.
 Table~\ref{tab:ablation_graph} summarizes the results for all MSTGN variants.
@@ -701,6 +710,65 @@ Three conclusions emerge.
 \textbf{(2)~GCN provides marginal but consistent gains}: Adding graph embeddings improves StatMLP by 0.01\,h (MAE) and 0.51\,h (RMSE), and improves GRU by 0.47\,h in the late-fusion variant.
 The larger RMSE reduction suggests the spatial context primarily helps on high-error outliers.
 \textbf{(3)~Early fusion of graph features hurts}: MSTGN-GRU, which concatenates cell embeddings to every timestep, performs \textit{worse} than the plain GRU (16.06 vs.\ 16.03\,h), indicating that injecting constant spatial features into the recurrent input stream dilutes the temporal signal.
+
+
+\subsubsection{Ablation: Grid Resolution}
+\label{sec:grid_ablation}
+
+To assess sensitivity to the $2^\circ{\times}2^\circ$ grid resolution, we train MSTGN-MLP2 (no KD) with three different cell sizes: 1°, 2°, and 4°.
+For each resolution, we rebuild the route graph (yielding different node counts and adjacency matrices) and recompute cell ID assignments for all training and test samples.
+Table~\ref{tab:ablation_grid} reports test MAE and RMSE.
+
+\begin{table}[t]
+    \centering
+    \caption{Ablation: Effect of Grid Resolution on MSTGN-MLP2 (no KD). Coarser cells average over larger ocean regions; finer cells are sparser due to the minimum-50-count threshold.}
+    \label{tab:ablation_grid}
+    \begin{tabular}{lcccc}
+        \toprule
+        \textbf{Cell size} & \textbf{Nodes} & \textbf{MAE (h)} & \textbf{RMSE (h)} & \textbf{MAPE (\%)} \\
+        \midrule
+        $1^\circ{\times}1^\circ$ & TBD & TBD & TBD & TBD \\
+        $2^\circ{\times}2^\circ$ & 1,541 & \textbf{15.28} & 26.58 & 9.33 \\
+        $4^\circ{\times}4^\circ$ & TBD & TBD & TBD & TBD \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+The $2^\circ{\times}2^\circ$ resolution was selected empirically as a balance between spatial granularity and graph connectivity.
+At $1^\circ$ resolution, the minimum-count (50) threshold eliminates many sparsely visited cells, but the finer grid better distinguishes adjacent shipping lanes.
+At $4^\circ$ resolution, each node aggregates a much larger ocean region ($4^\circ{\approx}440$\,km), potentially conflating topologically diverse corridors into a single embedding.
+Results will be reported after experiments on server complete.
+
+
+\subsubsection{Ablation: Graph Embeddings as XGBoost Features}
+\label{sec:gcn_xgb_ablation}
+
+A key reviewer question is whether MSTGN-MLP2's advantage over XGBoost stems from the \textit{graph information} itself or from the \textit{neural fusion head} (a deep MLP trained end-to-end with backpropagation).
+To isolate these contributions, we conduct the following experiment:
+we extract the learned GCN cell embeddings from the trained MSTGN-MLP2 checkpoint, then train a new XGBoost model using the same 85-dimensional statistical feature set plus the 96-dimensional GCN context features (current cell, origin cell, route mean embedding), yielding a 181-dimensional feature vector.
+
+Table~\ref{tab:ablation_gcn_xgb} compares four configurations.
+
+\begin{table}[t]
+    \centering
+    \caption{Ablation: Isolating Graph Information from Neural Fusion Head. ``Stats'' refers to 85-dim statistical features (same aggregations as MSTGN-MLP2); ``GCN'' refers to 96-dim GCN cell embeddings (current + origin + route mean).}
+    \label{tab:ablation_gcn_xgb}
+    \begin{tabular}{lccccc}
+        \toprule
+        \textbf{Model} & \textbf{Stats} & \textbf{GCN} & \textbf{Neural head} & \textbf{MAE (h)} & \textbf{RMSE (h)} \\
+        \midrule
+        XGBoost (original)        & 44-d  &             &             & 15.14 & 25.56 \\
+        XGBoost (Stats-only)      & 85-d  &             &             & TBD & TBD \\
+        XGBoost (Stats + GCN)     & 85-d  & \checkmark  &             & TBD & TBD \\
+        MSTGN-MLP2 (no KD)        & 85-d  & \checkmark  & \checkmark  & 15.28 & 26.58 \\
+        MSTGN-MLP2 + KD           & 85-d  & \checkmark  & \checkmark  & \textbf{15.13} & \textbf{26.16} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+If XGBoost (Stats + GCN) approaches MSTGN-MLP2 (no KD), it would imply that the graph embeddings are the key signal and the neural head provides little benefit beyond tree-level capacity.
+If the neural head closes a significant gap, it confirms that end-to-end backpropagation through the GCN and MLP head jointly optimizes the spatial embedding in ways a decoupled tree model cannot replicate.
+Results will be reported after experiments complete.
 
 
 \subsubsection{Knowledge Distillation Analysis}
@@ -837,6 +905,13 @@ Third, incorporating meteorological features yields a 7.1\% MAE improvement, asy
 
 These findings provide practical guidance for maritime stakeholders: invest in feature engineering and knowledge distillation before pursuing complex deep architectures.
 Future work will explore ocean current data integration, multi-step prediction horizons where temporal modeling may provide greater benefit, and extending the evaluation to global shipping routes.
+
+\paragraph{Historical statistical priors.}
+One class of features not evaluated in this work is \textit{route-conditioned historical priors}: for each observed vessel position, one could compute the empirical mean remaining ETA averaged over all prior voyages that passed through the same grid cell on the same route (identified by origin-destination port pair).
+Such features represent a strong informative baseline that is computationally simple and interpretable.
+On long trans-Pacific voyages, voyage-level regularities (e.g., seasonal speed profiles, typical berth waiting times at destination ports) are partially captured by the GCN's route mean embedding, but an explicit historical mean ETA prior conditioned on (current cell, destination port) would provide a more direct signal.
+Preliminary analysis suggests that port-specific dwell times and berth scheduling patterns have high variance and would require substantially more data per port-route-season combination to estimate reliably.
+We leave a systematic evaluation of historical statistical priors as a feature family, including per-route empirical speed profiles and destination-port arrival distributions, for future work.
 
 
 %==============================================================

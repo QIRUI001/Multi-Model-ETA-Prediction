@@ -165,6 +165,8 @@ def main():
     parser.add_argument('--cache_dir', default='output/cache_sequences/seq48_label24_pred1_mv150000_ms50000000')
     parser.add_argument('--norm_path', default='output/norm_params.npz')
     parser.add_argument('--graph_dir', default='output/graph')
+    parser.add_argument('--cell_ids_dir', default=None,
+                        help='Directory containing cell_ids_*.npy files. Defaults to cache_dir.')
     parser.add_argument('--output_dir', default='output/mstgn')
     parser.add_argument('--batch_size', type=int, default=4096)
     parser.add_argument('--num_workers', type=int, default=8)
@@ -252,6 +254,9 @@ def main():
     cache_dir = Path(args.cache_dir)
     counts = np.load(cache_dir / 'actual_counts.npy', allow_pickle=True).item()
 
+    # Cell IDs can come from a separate directory (e.g., for grid-resolution ablation)
+    cell_ids_dir = Path(args.cell_ids_dir) if args.cell_ids_dir else cache_dir
+
     # Soft targets for knowledge distillation
     soft_dir = None
     if args.distill:
@@ -262,18 +267,18 @@ def main():
         print(f"Knowledge distillation enabled: alpha={args.distill_alpha}, soft_dir={soft_dir}")
 
     train_ds = MSTGNDataset(
-        cache_dir / 'X_train.npy', cache_dir / 'cell_ids_train.npy',
+        cache_dir / 'X_train.npy', cell_ids_dir / 'cell_ids_train.npy',
         cache_dir / 'y_train.npy', counts['train'],
         soft_targets_path=soft_dir / 'y_soft_train.npy' if soft_dir else None,
         sample_weights_path=args.sample_weights if args.sample_weights else None
     )
     val_ds = MSTGNDataset(
-        cache_dir / 'X_val.npy', cache_dir / 'cell_ids_val.npy',
+        cache_dir / 'X_val.npy', cell_ids_dir / 'cell_ids_val.npy',
         cache_dir / 'y_val.npy', counts['val'],
         soft_targets_path=soft_dir / 'y_soft_val.npy' if soft_dir else None
     )
     test_ds = MSTGNDataset(
-        cache_dir / 'X_test.npy', cache_dir / 'cell_ids_test.npy',
+        cache_dir / 'X_test.npy', cell_ids_dir / 'cell_ids_test.npy',
         cache_dir / 'y_test.npy', counts['test']
     )
 

@@ -260,6 +260,9 @@ def build_graph(args):
     print("\n=== Phase 6: Computing cell_ids for cached data ===")
 
     cache_dir = Path(args.cache_dir)
+    cell_ids_out_dir = Path(args.cell_ids_dir) if args.cell_ids_dir else cache_dir
+    cell_ids_out_dir.mkdir(parents=True, exist_ok=True)
+
     norm = np.load(args.norm_path, allow_pickle=True)
     fmin = norm['feature_min']
     fmax = norm['feature_max']
@@ -287,7 +290,7 @@ def build_graph(args):
             raw = np.clip(raw, 0, max_raw_id - 1)
             cell_ids[start:end] = lookup[raw]
 
-        save_path = cache_dir / f'cell_ids_{split}.npy'
+        save_path = cell_ids_out_dir / f'cell_ids_{split}.npy'
         np.save(save_path, cell_ids)
         print(f"  {split}: {n:,} samples → {save_path}")
 
@@ -298,7 +301,7 @@ def build_graph(args):
 
     for split in ['train', 'val', 'test']:
         n = counts[split]
-        cids = np.load(cache_dir / f'cell_ids_{split}.npy')[:n]
+        cids = np.load(cell_ids_out_dir / f'cell_ids_{split}.npy')[:n]
         unknown_pct = (cids == UNKNOWN_NODE).mean() * 100
         unique_cells = len(np.unique(cids))
         print(f"  {split}: {unknown_pct:.2f}% unknown cells, {unique_cells} unique cells used")
@@ -313,6 +316,8 @@ if __name__ == '__main__':
                         default='output/cache_sequences/seq48_label24_pred1_mv150000_ms50000000')
     parser.add_argument('--norm_path', default='output/norm_params.npz')
     parser.add_argument('--output_dir', default='output/graph')
+    parser.add_argument('--cell_ids_dir', default=None,
+                        help='Directory to save cell_ids_*.npy. Defaults to cache_dir.')
     parser.add_argument('--chunk_size', type=int, default=2_000_000)
     parser.add_argument('--cell_size', type=float, default=2.0)
     args = parser.parse_args()
