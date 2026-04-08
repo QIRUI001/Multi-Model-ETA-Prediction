@@ -36,8 +36,9 @@ First, we conduct a systematic empirical comparison of ten forecasting models sp
 Second, we propose MSTGN (Maritime Spatio-Temporal Graph Network), which constructs a route graph over ocean grid cells and uses Graph Convolutional Networks (GCN) to learn spatial context for ETA prediction.
 Our results reveal that while XGBoost achieves strong single-model performance (MAE = 15.14\,h), our proposed MSTGN with enriched statistical features and GCN-derived spatial embeddings achieves competitive single-model accuracy (MAE = 15.13\,h) through ensemble knowledge distillation, surpassing XGBoost without requiring multiple inference-time models.
 Ablation studies show that statistical feature engineering is the dominant factor in prediction quality, MSTGN functions as a graph-augmented feature fusion model (rather than an end-to-end spatio-temporal network), and knowledge distillation from a multi-seed ensemble effectively transfers collective knowledge into a single compact model.
-A detailed large-deviation analysis reveals that 96\% of extreme errors ($>$100\,h) are underestimates concentrated in ultra-long voyages, stemming from log-space target compression and data imbalance; we evaluate remediation strategies including label distribution smoothing and post-hoc calibration, achieving up to 5\% relative reduction in tail errors.
-These findings reveal that for single-step vessel ETA prediction, compact statistical features combined with spatial graph context and knowledge distillation provide an effective and elegant approach that surpasses gradient-boosted tree baselines.
+Beyond point-prediction accuracy, we apply ensemble-based conformal prediction to produce calibrated prediction intervals with finite-sample coverage guarantees, achieving 90\% coverage with adaptive intervals of 64.3\,h mean width.
+We propose Duration-Stratified Calibration Error (DSCE), a metric for assessing interval reliability across voyage duration strata, and derive operationally actionable buffer times for port scheduling.
+These findings reveal that for single-step vessel ETA prediction, compact statistical features combined with spatial graph context, knowledge distillation, and conformal uncertainty quantification provide an effective and operationally practical approach.
 \end{abstract}
 
 \section{Introduction}
@@ -68,6 +69,7 @@ Our main contributions are:
     \item An ensemble knowledge distillation framework that trains a multi-seed teacher ensemble (15 models, top-7 achieving MAE = 14.95\,h) and distills its knowledge into a single student model that retains virtually all of the ensemble's advantage.
     \item Ablation studies demonstrating that (a) statistical feature engineering is the dominant factor, (b) temporal sequence modeling adds limited value, (c) incorporating meteorological features yields a 7.1\% MAE improvement, (d) MSTGN is best understood as a graph-augmented statistical fusion model rather than an end-to-end spatio-temporal network, and (e) the $2^\circ{\times}2^\circ$ grid resolution is empirically validated against $1^\circ$ and $4^\circ$ alternatives.
     \item A large-deviation analysis identifying that 96\% of extreme prediction errors ($>$100\,h) are systematic underestimates concentrated in ultra-long voyages, with evaluation of remediation strategies achieving up to 5\% relative tail error reduction.
+    \item An uncertainty quantification framework using ensemble-based conformal prediction that produces calibrated prediction intervals, together with a novel Duration-Stratified Calibration Error (DSCE) metric and operationally actionable buffer time recommendations for port scheduling.
 \end{enumerate}
 
 \section{Related Work}
@@ -481,6 +483,16 @@ We report the following metrics on the test set:
     \item \textbf{MAE} (Mean Absolute Error, in hours): $\frac{1}{N}\sum_{i}|\hat{y}_i - y_i|$.
     \item \textbf{RMSE} (Root Mean Squared Error, in hours): $\sqrt{\frac{1}{N}\sum_{i}(\hat{y}_i - y_i)^2}$.
     \item \textbf{MAPE} (Mean Absolute Percentage Error, \%): computed only on samples where $y_i > 24$ hours, to avoid division-by-zero artifacts on near-arrival predictions.
+    \item \textbf{MedAE} (Median Absolute Error, in hours): the median of $|\hat{y}_i - y_i|$, which is robust to outliers and reflects typical prediction quality.
+    \item $\boldsymbol{R^2}$ (Coefficient of Determination): $1 - \sum_i(\hat{y}_i - y_i)^2 / \sum_i(y_i - \bar{y})^2$.
+    \item \textbf{Within-$\tau$} accuracy: the fraction of predictions with $|\hat{y}_i - y_i| \leq \tau$ hours, reported for $\tau \in \{6, 12, 24\}$.
+\end{itemize}
+
+For uncertainty quantification (Section~\ref{sec:uq}), we additionally report:
+\begin{itemize}
+    \item \textbf{PICP} (Prediction Interval Coverage Probability): the fraction of test samples whose true value falls within the predicted interval.
+    \item \textbf{MPIW} (Mean Prediction Interval Width, in hours): the average width of prediction intervals, measuring sharpness.
+    \item \textbf{DSCE} (Duration-Stratified Calibration Error): the maximum absolute deviation between the stratum-level PICP and the target coverage across voyage duration bins, measuring worst-case miscalibration.
 \end{itemize}
 
 
@@ -558,6 +570,26 @@ Panel~(a) shows strong agreement between predicted and actual remaining time acr
 Panel~(b) reveals that MAE increases monotonically with true remaining time: predictions within the first day achieve MAE~$< 3$\,h, while voyages beyond 14 days (336\,h) exhibit MAE~$> 25$\,h, consistent with the compounding uncertainty of long-horizon prediction.
 Panel~(c) shows the error distribution is approximately symmetric with a slight negative bias (mean error $= -2.56$\,h, median $= +1.18$\,h), indicating no systematic over- or underestimation for the majority of predictions.
 Panel~(d) presents the cumulative accuracy curve: 50\% of predictions fall within 8.3\,h of the true value, 90\% within 35.2\,h, and 95\% within 51.4\,h.
+
+Table~\ref{tab:extended_metrics} supplements the main results with additional metrics for the key models.
+MSTGN-KD achieves MedAE~$=$~8.31\,h (indicating that the typical prediction is within $\pm$8\,h), $R^2 = 0.958$, and 41.1\% of predictions within $\pm$6\,h of the true value.
+The ensemble further improves MedAE to 8.09\,h and within-24h accuracy to 82.1\%.
+
+\begin{table}[t]
+    \centering
+    \caption{Extended evaluation metrics for key models. Within-$\tau$: fraction of predictions with $|\text{error}| \leq \tau$\,h.}
+    \label{tab:extended_metrics}
+    \footnotesize
+    \begin{tabular}{lccccc}
+        \toprule
+        \textbf{Model} & \textbf{MedAE} & $\boldsymbol{R^2}$ & \textbf{$\pm$6\,h} & \textbf{$\pm$12\,h} & \textbf{$\pm$24\,h} \\
+        \midrule
+        MSTGN-MLP2   & 8.13 & 0.957 & 41.7\% & 61.6\% & 81.5\% \\
+        MSTGN-KD     & 8.31 & 0.958 & 41.1\% & 61.0\% & 81.6\% \\
+        MSTGN-Ens7   & \textbf{8.09} & \textbf{0.959} & \textbf{41.5\%} & \textbf{61.5\%} & \textbf{82.1\%} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
 
 \begin{figure*}[t]
     \centering
@@ -893,7 +925,109 @@ With $\beta = 0.3$, this reduces the $[504, 720)$\,h bin rate from 36.2\% to 32.
 Combined with LDS training, this two-stage approach achieves the lowest large-deviation rate (1.226\%, a 5.0\% relative reduction) but at 0.43\,h MAE cost.
 
 The consistent finding across all strategies is that reducing tail errors for the $< 1\%$ of ultra-long voyages requires shifting predictions upward, which necessarily degrades accuracy for the $> 99\%$ of shorter voyages.
-This MAE--reliability trade-off is a fundamental consequence of the skewed voyage duration distribution and the log-space training objective, and suggests that \textbf{practical deployment should adopt duration-aware confidence intervals rather than seeking a single point estimator} that satisfies both the head and the tail of the distribution.
+This MAE--reliability trade-off is a fundamental consequence of the skewed voyage duration distribution and the log-space training objective, and motivates the uncertainty quantification framework presented next.
+
+\subsection{Uncertainty Quantification via Conformal Prediction}
+\label{sec:uq}
+
+Port operators require not only a point ETA estimate but also a measure of \textit{how uncertain} that estimate is, enabling dynamic buffer allocation and risk-aware berth scheduling.
+We leverage the multi-seed ensemble's prediction disagreement as an epistemic uncertainty signal and apply \textit{split conformal prediction}~\cite{vovk2005conformal,romano2019cqr} to produce calibrated prediction intervals with finite-sample coverage guarantees.
+
+\subsubsection{Method}
+Given the 15-model MSTGN-MLP2 ensemble, for each test sample $i$ we compute the ensemble mean $\hat{y}_i = \frac{1}{K}\sum_{k=1}^{K}\hat{y}_i^{(k)}$ as the point estimate and the ensemble standard deviation $\hat{\sigma}_i = \text{std}(\{\hat{y}_i^{(k)}\}_{k=1}^{K})$ as the uncertainty estimate.
+We split the test set into a calibration half ($n=1.43$M) and an evaluation half.
+On the calibration set, we compute \textit{normalized nonconformity scores} $s_i = |y_i - \hat{y}_i| / \hat{\sigma}_i$, from which the conformal quantile $\hat{q}_{1{-}\alpha}$ is computed with finite-sample correction.
+The \textit{adaptive} prediction interval for a new sample is $[\hat{y} - \hat{q}_{1{-}\alpha} \cdot \hat{\sigma},\; \hat{y} + \hat{q}_{1{-}\alpha} \cdot \hat{\sigma}]$, producing wider intervals for high-uncertainty samples and narrower intervals for confident predictions.
+We compare against \textit{fixed-width} conformal intervals that use raw residuals without normalization by $\hat{\sigma}$.
+
+\subsubsection{Conformal Prediction Results}
+
+Table~\ref{tab:conformal} reports the marginal coverage and interval width.
+
+\begin{table}[t]
+    \centering
+    \caption{Conformal prediction intervals on the held-out evaluation set ($n=1.43$M). Adaptive intervals scale by ensemble~$\hat{\sigma}$; fixed intervals use constant width.}
+    \label{tab:conformal}
+    \begin{tabular}{lccc}
+        \toprule
+        \textbf{Target} & \textbf{Method} & \textbf{PICP} & \textbf{MPIW (h)} \\
+        \midrule
+        \multirow{2}{*}{90\%} & Adaptive ($\hat{\sigma}$-scaled) & 89.9\% & \textbf{64.3} \\
+        & Fixed-width & 90.0\% & 69.8 \\
+        \midrule
+        \multirow{2}{*}{95\%} & Adaptive ($\hat{\sigma}$-scaled) & 95.0\% & \textbf{93.2} \\
+        & Fixed-width & 95.0\% & 102.5 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Both methods achieve the target coverage, confirming conformal validity.
+The adaptive intervals are 8--9\% narrower than fixed-width intervals (64.3 vs.\ 69.8\,h at 90\%), demonstrating that ensemble uncertainty is a meaningful signal: the model ``knows when it doesn't know.''
+The Spearman rank correlation between $\hat{\sigma}$ and absolute error is $\rho = 0.568$ ($p < 10^{-300}$), confirming strong monotonic alignment between predicted uncertainty and actual error magnitude.
+
+\subsubsection{Stratified Calibration Analysis}
+
+While marginal coverage is near-exact, calibration may degrade for specific subpopulations.
+We propose \textbf{Duration-Stratified Calibration Error (DSCE)}, defined as the maximum absolute deviation between stratum-level PICP and the target coverage across voyage duration bins:
+\begin{equation}
+    \text{DSCE} = \max_{s \in \mathcal{S}} \bigl|\text{PICP}_s - (1{-}\alpha)\bigr|,
+\end{equation}
+where $\mathcal{S}$ partitions samples by true remaining time.
+Lower DSCE indicates more uniform reliability across voyage stages.
+
+Table~\ref{tab:stratified_calib} reports 90\% adaptive interval metrics stratified by voyage duration.
+
+\begin{table}[t]
+    \centering
+    \caption{Stratified calibration of 90\% adaptive conformal intervals by voyage duration. RPIW $=$ MPIW / median\_true\_duration.}
+    \label{tab:stratified_calib}
+    \footnotesize
+    \begin{tabular}{lrcccr}
+        \toprule
+        \textbf{Duration bin} & \textbf{$N$} & \textbf{PICP} & \textbf{MPIW} & \textbf{MAE} & $\bar{\sigma}$ \\
+        \midrule
+        $[0, 100)$\,h   & 956K  & 94.8\% & 31.1\,h  & 5.7\,h  & 2.4\,h \\
+        $[100, 200)$\,h  & 748K  & 88.7\% & 52.2\,h  & 12.8\,h & 4.0\,h \\
+        $[200, 400)$\,h  & 986K  & 87.0\% & 87.0\,h  & 21.8\,h & 6.7\,h \\
+        $[400, 720)$\,h  & 171K  & 85.6\% & 171.6\,h & 38.4\,h & 13.3\,h \\
+        \midrule
+        \multicolumn{2}{l}{\textbf{DSCE}} & \multicolumn{4}{l}{\textbf{4.78\,pp}} \\
+        \multicolumn{2}{l}{MCE (mean)} & \multicolumn{4}{l}{3.38\,pp} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Short voyages ($< 100$\,h) are \textit{over-covered} (94.8\% vs.\ 90\% target), meaning intervals are conservative---acceptable for operational safety.
+Long voyages ($> 400$\,h) are \textit{under-covered} (85.6\%), reflecting the same long-tail difficulty identified in Section~\ref{sec:large_dev}.
+The DSCE of 4.78\,pp indicates that worst-case stratum-level miscoverage is moderate; no stratum deviates by more than 5 percentage points from the target.
+
+\subsubsection{Operational Buffer Time Analysis}
+
+For port operators, the prediction interval can be translated into a \textit{buffer time}---the additional slack to add to the point ETA to achieve a desired on-time reliability.
+Table~\ref{tab:buffer} reports the empirical buffer needed for 90\% and 95\% on-time arrival, stratified by remaining voyage duration.
+
+\begin{table}[t]
+    \centering
+    \caption{Operational buffer times by remaining voyage duration. Buffer$_{90}$ (Buffer$_{95}$): the 90th (95th) percentile of underestimation error $y_\text{true} - \hat{y}$, i.e., the buffer to add for 90\% (95\%) on-time reliability.}
+    \label{tab:buffer}
+    \footnotesize
+    \begin{tabular}{lrccc}
+        \toprule
+        \textbf{Remaining time} & \textbf{$N$} & \textbf{Late \%} & \textbf{Buf$_{90}$} & \textbf{Buf$_{95}$} \\
+        \midrule
+        $< 1$ day     & 324K  & 30.4\% & 1.5\,h  & 3.0\,h \\
+        1--3 days     & 410K  & 32.1\% & 6.9\,h  & 15.0\,h \\
+        3--7 days     & 744K  & 38.4\% & 16.1\,h & 26.1\,h \\
+        7--14 days    & 980K  & 45.1\% & 30.2\,h & 48.1\,h \\
+        $> 14$ days   & 402K  & 62.4\% & 67.8\,h & 96.0\,h \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+For near-arrival predictions ($< 1$ day remaining), a buffer of just 1.5\,h suffices for 90\% reliability---directly usable for berth scheduling.
+For early-voyage predictions ($> 14$ days), the 90\% buffer grows to 67.8\,h ($\sim$3 days), reflecting the fundamental uncertainty of long-horizon maritime forecasting.
+The monotonically increasing late-arrival rate (30.4\% to 62.4\%) confirms the systematic underestimation bias in the tail identified in the large-deviation analysis.
+These duration-specific buffers enable \textit{risk-aware scheduling}: port operators can apply tighter buffers for near-arrival vessels (high confidence) and wider buffers for distant vessels (high uncertainty), optimizing berth utilization while maintaining service reliability.
 
 %==============================================================
 \section{Conclusion}
@@ -911,8 +1045,12 @@ Extending the feature set to 81 dimensions with richer aggregations and cross-fe
 
 Third, incorporating meteorological features yields a 7.1\% MAE improvement, asymmetric loss functions degrade accuracy by up to 17.6\%, and self-distillation from a single model is ineffective---confirming that ensemble diversity is necessary for effective knowledge transfer.
 
-These findings provide practical guidance for maritime stakeholders: invest in feature engineering and knowledge distillation before pursuing complex deep architectures.
-Future work will explore ocean current data integration, multi-step prediction horizons where temporal modeling may provide greater benefit, and extending the evaluation to global shipping routes.
+Fourth, ensemble-based conformal prediction produces well-calibrated prediction intervals (89.9\% actual coverage at 90\% target) that are 8\% narrower than fixed-width alternatives.
+The proposed Duration-Stratified Calibration Error (DSCE $=$ 4.78\,pp) reveals moderate under-coverage for ultra-long voyages but acceptable reliability elsewhere.
+Duration-specific buffer times (1.5\,h for $<$1-day predictions, 67.8\,h for $>$14-day predictions) provide directly actionable guidance for port operators.
+
+These findings provide practical guidance for maritime stakeholders: invest in feature engineering and knowledge distillation before pursuing complex deep architectures, and complement point predictions with conformal intervals for risk-aware scheduling.
+Future work will explore ocean current data integration, multi-step prediction horizons where temporal modeling may provide greater benefit, extending the evaluation to global shipping routes, and improving long-tail calibration through duration-conditioned conformal procedures.
 
 \paragraph{Historical statistical priors.}
 One class of features not evaluated in this work is \textit{route-conditioned historical priors}: for each observed vessel position, one could compute the empirical mean remaining ETA averaged over all prior voyages that passed through the same grid cell on the same route (identified by origin-destination port pair).
@@ -1034,6 +1172,12 @@ J.~Yu, G.~Tang, X.~Song, X.~Yu, Y.~Qi, D.~Li, and Y.~Zhang, ``Ship Arrival Predi
 
 \bibitem{yang2021lds}
 Y.~Yang, K.~Zha, Y.~Chen, H.~Wang, and D.~Katabi, ``Delving into Deep Imbalanced Regression,'' in \textit{Proc.\ International Conference on Machine Learning (ICML)}, 2021, pp.~11842--11855.
+
+\bibitem{vovk2005conformal}
+V.~Vovk, A.~Gammerman, and G.~Shafer, \textit{Algorithmic Learning in a Random World}.\hskip 1em plus 0.5em minus 0.4em Springer, 2005.
+
+\bibitem{romano2019cqr}
+Y.~Romano, E.~Patterson, and E.~Candes, ``Conformalized Quantile Regression,'' in \textit{Advances in Neural Information Processing Systems (NeurIPS)}, vol.~32, 2019.
 
 \end{thebibliography}
 
