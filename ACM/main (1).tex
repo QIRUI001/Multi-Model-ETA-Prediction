@@ -49,7 +49,8 @@ These findings reveal that for single-step vessel ETA prediction, compact statis
 \end{abstract}
 
 
-\keywords{vessel ETA prediction, maritime forecasting, AIS data, graph neural networks, knowledge distillation, conformal prediction, uncertainty quantification}
+\keywords{vessel ETA prediction, AIS data, graph neural networks, knowledge distillation, conformal prediction}
+
 
 \maketitle
 
@@ -70,19 +71,28 @@ Most existing studies evaluate only one or two architectures, use different data
 Recent comprehensive surveys in time-series forecasting~\cite{kim2025comprehensive, zeng2023transformers} have emphasized the importance of fair benchmarking, revealing that simpler models often rival or surpass complex architectures when evaluated properly.
 
 % Identify the gap
-This paper addresses this gap by conducting a rigorous empirical comparison of ten forecasting models from five architectural families on a large-scale trans-Pacific AIS dataset.
-Our model selection follows the taxonomy proposed in recent deep time-series forecasting surveys~\cite{kim2025comprehensive}: we include at least one representative from each major family (recurrent, convolutional, attention-based, tree-based, and feedforward) to ensure comprehensive coverage.
-All models are trained and evaluated under identical conditions---including data splits, feature sets, normalization, loss function, optimizer, and early-stopping criteria---to isolate the effect of model architecture.
+To address these challenges, we study full-voyage trans-Pacific vessel ETA prediction as a large-scale geospatial forecasting problem over AIS trajectories. We introduce MSTGN, a graph-augmented ETA prediction model that exploits maritime route structure by discretizing ocean space into grid cells, constructing a route graph from AIS transitions and geographic adjacency, and fusing GCN-derived spatial context with navigation and meteorological features. Based on this framework, we conduct a controlled benchmark of ten representative forecasting models across five architectural families and evaluate both prediction accuracy and operational reliability. Our primary contributions are fourfold:
 
-Our main contributions are:
 \begin{enumerate}
-    \item A fair, large-scale empirical comparison of ten models spanning five architectural families for vessel ETA prediction, providing controlled benchmarks for maritime forecasting.
-    \item A novel Maritime Spatio-Temporal Graph Network (MSTGN) that constructs a route graph over ocean grid cells and fuses GCN-derived spatial context with enriched statistical features, achieving competitive single-model performance through knowledge distillation (MAE = 15.13\,h), surpassing XGBoost (15.14\,h) without ensemble inference.
-    \item An ensemble knowledge distillation framework that trains a multi-seed teacher ensemble (15 models, top-7 achieving MAE = 14.95\,h) and distills its knowledge into a single student model that retains virtually all of the ensemble's advantage.
-    \item Ablation studies demonstrating that (a) statistical feature engineering is the dominant factor, (b) temporal sequence modeling adds limited value, (c) incorporating meteorological features yields a 7.1\% MAE improvement, (d) MSTGN is best understood as a graph-augmented statistical fusion model rather than an end-to-end spatio-temporal network, and (e) the $2^\circ{\times}2^\circ$ grid resolution is empirically validated against $1^\circ$ and $4^\circ$ alternatives.
-    \item A large-deviation analysis identifying that 96\% of extreme prediction errors ($>$100\,h) are systematic underestimates concentrated in ultra-long voyages, with evaluation of remediation strategies achieving up to 5\% relative tail error reduction.
-    \item An uncertainty quantification framework using ensemble-based conformal prediction that produces calibrated prediction intervals, together with a novel Duration-Stratified Calibration Error (DSCE) metric and operationally actionable buffer time recommendations for port scheduling.
+    \item We formulate full-voyage trans-Pacific vessel ETA prediction as a large-scale geospatial forecasting problem, using 35.9 million AIS position reports and 9,087 voyages to evaluate ETA models under a unified and reproducible experimental protocol.
+
+    \item We propose MSTGN, a graph-augmented ETA prediction model that discretizes ocean space into route-aware grid cells, constructs a maritime route graph from AIS transitions and geographic adjacency, and fuses GCN-derived spatial context with enriched navigation and meteorological features.
+
+    \item We provide a controlled empirical study of ten representative forecasting models across five architectural families, showing that graph-augmented statistical feature fusion and ensemble knowledge distillation achieve strong single-model accuracy while avoiding multi-model inference at deployment.
+
+    \item We analyze operational reliability beyond average error, including large-deviation failures on ultra-long voyages and ensemble-based conformal prediction intervals, and derive duration-specific buffer times for port scheduling under uncertainty.
 \end{enumerate}
+
+
+% Our main contributions are:
+% \begin{enumerate}
+%     \item A fair, large-scale empirical comparison of ten models spanning five architectural families for vessel ETA prediction, providing controlled benchmarks for maritime forecasting.
+%     \item A novel Maritime Spatio-Temporal Graph Network (MSTGN) that constructs a route graph over ocean grid cells and fuses GCN-derived spatial context with enriched statistical features, achieving competitive single-model performance through knowledge distillation (MAE = 15.13\,h), surpassing XGBoost (15.14\,h) without ensemble inference.
+%     \item An ensemble knowledge distillation framework that trains a multi-seed teacher ensemble (15 models, top-7 achieving MAE = 14.95\,h) and distills its knowledge into a single student model that retains virtually all of the ensemble's advantage.
+%     \item Ablation studies demonstrating that (a) statistical feature engineering is the dominant factor, (b) temporal sequence modeling adds limited value, (c) incorporating meteorological features yields a 7.1\% MAE improvement, (d) MSTGN is best understood as a graph-augmented statistical fusion model rather than an end-to-end spatio-temporal network, and (e) the $2^\circ{\times}2^\circ$ grid resolution is empirically validated against $1^\circ$ and $4^\circ$ alternatives.
+%     \item A large-deviation analysis identifying that 96\% of extreme prediction errors ($>$100\,h) are systematic underestimates concentrated in ultra-long voyages, with evaluation of remediation strategies achieving up to 5\% relative tail error reduction.
+%     \item An uncertainty quantification framework using ensemble-based conformal prediction that produces calibrated prediction intervals, together with a novel Duration-Stratified Calibration Error (DSCE) metric and operationally actionable buffer time recommendations for port scheduling.
+% \end{enumerate}
 
 \section{Related Work}
 ETA prediction research falls into two branches: path/trajectory-based methods and machine-learning feature-engineering methods~\cite{leiPredictingVesselArrival2024}. AIS data provides diverse dynamic attributes (location, heading, speed) and static vessel details~\cite{yangHarnessingPowerMachine2024}. In the following subsections we review representative studies from each category.
@@ -326,7 +336,7 @@ where $\hat{y}^{\text{soft}}$ denotes the teacher ensemble prediction. We find t
 \section{Experiments}
 %==============================================================
 
-\subsection{Experimental Setup}
+\subsection{Dataset and Experimental Setup}
 
 We evaluate all methods on a proprietary AIS dataset covering trans-Pacific shipping routes between Chinese ports and the U.S.\ West Coast from January 2021 to March 2025. The raw data contain 35.9 million AIS records from 3,940 vessels. Each record includes MMSI, timestamp, longitude, latitude, speed over ground (SOG), and course over ground (COG); we additionally match temperature, wind speed, wind level (Beaufort scale), mean sea-level pressure, and horizontal visibility from contemporary weather data sources. Voyages are extracted using the procedure in Section~\ref{sec:voyage_extraction}, yielding 9,087 valid voyages and 13.1M/2.9M/2.9M train/validation/test sequences under a 70/15/15 split. All models use the same 48-step input with 11 features per time step.
 
