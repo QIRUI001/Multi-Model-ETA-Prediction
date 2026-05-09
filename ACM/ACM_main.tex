@@ -85,77 +85,67 @@ These findings reveal that for single-step vessel ETA prediction, compact statis
 \section{Introduction}
 
 Vessel Estimated Time of Arrival (ETA) prediction is a fundamental task in maritime logistics.
-Accurate ETAs enable port operators to optimize berth allocation, coordinate crane assignments, and reduce vessel waiting times, with significant economic and environmental implications~\cite{unctad2023}.
-The proliferation of Automatic Identification System (AIS) data---broadcasting vessel position, speed, and course at frequent intervals---has created an opportunity for data-driven approaches to ETA prediction~\cite{fang2022}.
+Accurate ETAs enable port operators to optimize berth allocation, coordinate crane assignments, reduce vessel waiting times, and improve the resilience of maritime supply chains~\cite{unctad2023}.
+With the widespread deployment of the Automatic Identification System (AIS), large volumes of vessel position, speed, and course records have become available for data-driven ETA prediction~\cite{fang2022}.
+For long-haul ocean shipping, however, ETA prediction is not only a time-series regression task.
+It is a geospatial forecasting problem over sparse AIS trajectories, route-constrained vessel movement, open-ocean corridors, and duration-dependent operational uncertainty.
 
-Recent years have seen a wide range of machine learning methods applied to this problem.
-Recurrent neural networks such as LSTM~\cite{zhang2022lstm} and GRU~\cite{han2021gru} naturally model the sequential nature of vessel trajectories.
-Convolutional approaches, including Temporal Convolutional Networks (TCN)~\cite{bai2018tcn}, capture local temporal patterns through dilated causal convolutions.
-Transformer-based architectures~\cite{dong2023transformer, zhou2021informer} leverage self-attention to model long-range dependencies.
-Meanwhile, gradient-boosted tree methods like XGBoost~\cite{chen2016xgboost} remain strong competitors through hand-crafted feature engineering.
+Full-voyage trans-Pacific ETA prediction is especially challenging because vessels may be thousands of nautical miles from the destination when predictions are made.
+At this scale, prediction quality depends not only on recent motion patterns but also on the vessel's spatial position within maritime corridors, the remaining route geometry, heterogeneous weather and navigation conditions, and the varying uncertainty of short-, medium-, and long-duration voyages.
+These characteristics make open-ocean ETA prediction different from near-port arrival prediction and require models that can represent both statistical voyage features and spatial route structure.
 
-Despite this diversity of approaches, a systematic comparison under controlled conditions is lacking.
-Most existing studies evaluate only one or two architectures, use different datasets with varying preprocessing pipelines, and often omit critical experimental details---making cross-paper comparisons unreliable.
-Recent comprehensive surveys in time-series forecasting~\cite{kim2025comprehensive, zeng2023transformers} have emphasized the importance of fair benchmarking, revealing that simpler models often rival or surpass complex architectures when evaluated properly.
+Recent years have seen a wide range of machine learning methods applied to vessel trajectory and ETA prediction.
+Recurrent neural networks such as LSTM~\cite{zhang2022lstm} and GRU~\cite{han2021gru} model sequential vessel dynamics, convolutional approaches such as TCN~\cite{bai2018tcn} capture local temporal patterns, and Transformer-based architectures~\cite{dong2023transformer, zhou2021informer} use attention mechanisms to model long-range dependencies.
+At the same time, gradient-boosted tree methods such as XGBoost~\cite{chen2016xgboost} remain highly competitive when strong tabular and statistical features are available.
+Despite this diversity, existing studies are difficult to compare directly because they often differ in route scope, prediction horizon, preprocessing pipeline, input representation, and evaluation protocol.
+Recent time-series forecasting surveys~\cite{kim2025comprehensive, zeng2023transformers} similarly caution that complex deep architectures do not always outperform simpler baselines under careful evaluation.
 
-% Identify the gap
-This paper addresses this gap by conducting a rigorous empirical comparison of ten forecasting models from five architectural families on a large-scale trans-Pacific AIS dataset.
-Our model selection follows the taxonomy proposed by recent deep time-series forecasting surveys~\cite{kim2025comprehensive}: we include at least one representative from each major family (recurrent, convolutional, attention-based, tree-based, and feedforward) to ensure comprehensive coverage.
-All models are trained and evaluated under identical conditions---same data splits, feature sets, normalization, loss function, optimizer, and early-stopping criteria---to isolate the effect of model architecture.
+To address these challenges, we study full-voyage trans-Pacific vessel ETA prediction as a large-scale geospatial forecasting problem over AIS trajectories.
+We introduce MSTGN, a graph-augmented ETA prediction framework that discretizes ocean space into route-aware grid cells, constructs a maritime route graph from observed AIS transitions and geographic adjacency, and fuses GCN-derived spatial context with enriched navigation and meteorological features.
+Rather than claiming to isolate architecture effects completely, we compare representative ETA prediction pipelines under a shared data split, target definition, preprocessing protocol, and evaluation metrics.
+This design allows us to examine which modeling ingredients are most useful for long-distance maritime ETA prediction while acknowledging that different model families rely on different input representations.
 
-Our main contributions are:
+Our primary contributions are fourfold:
 \begin{enumerate}
-    \item A fair, large-scale empirical comparison of ten models spanning five architectural families for vessel ETA prediction, providing controlled benchmarks for maritime forecasting.
-    \item A novel Maritime Spatio-Temporal Graph Network (MSTGN) that constructs a route graph over ocean grid cells and fuses GCN-derived spatial context with enriched statistical features, achieving competitive single-model performance through knowledge distillation (MAE = 15.13\,h), surpassing XGBoost (15.14\,h) without ensemble inference.
-    \item An ensemble knowledge distillation framework that trains a multi-seed teacher ensemble (15 models, top-7 achieving MAE = 14.95\,h) and distills its knowledge into a single student model that retains virtually all of the ensemble's advantage.
-    \item Ablation studies demonstrating that (a) statistical feature engineering is the dominant factor, (b) temporal sequence modeling adds limited value, (c) incorporating meteorological features yields a 7.1\% MAE improvement, (d) MSTGN is best understood as a graph-augmented statistical fusion model rather than an end-to-end spatio-temporal network, and (e) the $2^\circ{\times}2^\circ$ grid resolution is empirically validated against $1^\circ$ and $4^\circ$ alternatives.
-    \item A large-deviation analysis identifying that 96\% of extreme prediction errors ($>$100\,h) are systematic underestimates concentrated in ultra-long voyages, with evaluation of remediation strategies achieving up to 5\% relative tail error reduction.
-    \item An uncertainty quantification framework using ensemble-based conformal prediction that produces calibrated prediction intervals, together with a novel Duration-Stratified Calibration Error (DSCE) metric and operationally actionable buffer time recommendations for port scheduling.
+    \item We formulate full-voyage trans-Pacific vessel ETA prediction as a large-scale geospatial forecasting problem, using 35.9 million AIS position reports and 9,087 voyages to evaluate ETA prediction pipelines under a shared experimental protocol.
+
+    \item We propose MSTGN, a route-aware graph-augmented prediction framework that represents ocean space through grid cells, models maritime connectivity through transition and geographic edges, and integrates spatial graph embeddings with statistical navigation and weather features.
+
+    \item We provide a comparative study of ten representative ETA prediction pipelines across five model families. The results show that strong tabular baselines remain difficult to outperform, while MSTGN with knowledge distillation achieves comparable accuracy to strong tree-based baselines and supports deployable single-model inference.
+
+    \item We analyze operational reliability beyond average prediction error, including large-deviation failures on ultra-long voyages and ensemble-based conformal prediction intervals, and derive duration-specific buffer times for port scheduling under uncertainty.
 \end{enumerate}
 
 \section{Related Work}
-ETA prediction research falls into two branches: path/trajectory-based methods and machine-learning feature-engineering methods~\cite{leiPredictingVesselArrival2024}. AIS data provides diverse dynamic attributes (location, heading, speed) and static vessel details~\cite{yangHarnessingPowerMachine2024}. In the following subsections we review representative studies from each category.
 
-\subsection{ETA Prediction Based on Path Finding}
-Path-based methods preserve explicit spatial structure rather than treating ETA as tabular regression. Park et al.~\cite{parkVesselEstimatedTime2021} combined AIS route grids, Q-learning path search, and MCMC speed sampling to stabilize long-distance predictions. Yoon et al.~\cite{yoonEnhancingContainerVessel2023} built representative historical routes from prior port calls to map real-time AIS positions for ETA at Busan New Port. As reviewed by Jiang et al.~\cite{jiangPredictionVesselArrival2025}, such approaches are most effective when route structure is highly regular.
+Existing vessel ETA prediction studies can be broadly grouped by how they use vessel movement information.
+Path-based methods first construct, search, or match a likely route and then estimate the remaining travel time along that route.
+Trajectory-tracking methods instead learn arrival time from AIS trajectories, vessel states, and operational covariates.
+AIS data provides dynamic movement attributes such as location, speed, and heading, together with static vessel information~\cite{yangHarnessingPowerMachine2024}; recent reviews show that these data have supported a broad range of ETA prediction models across ports, waterways, and maritime logistics settings~\cite{jiangPredictionVesselArrival2025,nomanReviewVesselTime2025}.
+We review these two dominant branches before summarizing the remaining gaps for full-voyage open-ocean ETA prediction.
 
-\subsection{ETA Prediction Based on Feature Engineering}
-Feature-engineering methods treat ETA as supervised regression over AIS variables and operational covariates. Yu et al.~\cite{yuShipArrivalPrediction2018} showed that RF models link ETA forecasts directly to berth scheduling decisions. The branch has since evolved toward multi-source fusion and stacking: Kolley et al.~\cite{kolleyRobustBerthScheduling2022} integrated machine-learned ETA into robust berth scheduling; Lei et al.~\cite{leiPredictingVesselArrival2024} incorporated inland waterway factors via tree-based stacking; Chu et al.~\cite{chuVesselArrivalTime2025} fused port call records with AIS for improved accuracy; and Saber et al.~\cite{saberHighaccuracyPredictionVessels2025} achieved strong results with a hybrid Extra Trees/LightGBM stack. These studies confirm that operational and environmental covariates are increasingly central to model design.
-% \begin{table*}[htbp]
-% \centering
-% \caption{Summary of related literature.}
-% \label{tab:related_literature}
-% \footnotesize
-% \setlength{\tabcolsep}{4pt}
-% \renewcommand{\arraystretch}{1.15}
+\subsection{Path-based Vessel ETA Prediction}
+Path-based methods preserve explicit spatial route information rather than treating ETA as a purely tabular regression problem.
+Park et al.~\cite{parkVesselEstimatedTime2021} combined AIS route grids, Q-learning path search, and MCMC-based speed sampling to stabilize vessel ETA prediction around Busan Port.
+Yoon et al.~\cite{yoonEnhancingContainerVessel2023} constructed representative historical routes from prior port calls and mapped real-time AIS positions to route segments for container-vessel ETA prediction at Busan New Port.
+Wenzel et al.~\cite{wenzelNeuralNetworkApproach2023} also incorporated route-distance estimation into neural ETA prediction for inland waterway transport.
+More recently, Lloret-Batlle et al.~\cite{lloretbatlle2025} studied cross-Pacific ETA prediction using AIS trajectory data, further illustrating the importance of long-distance spatial context.
+As reviewed by Jiang et al.~\cite{jiangPredictionVesselArrival2025}, path-based approaches are most effective when route structure is sufficiently regular and historical route patterns can be reused.
 
-% \begin{tabular}{P{2.3cm} P{2.0cm} P{2.2cm} P{2.2cm} P{1.5cm} P{3.6cm}}
-% \toprule
-% \textbf{Article} & \textbf{Scenario category} & \textbf{Compared models} & \textbf{Data source} & \textbf{Best model} & \textbf{Characteristic} \\
-% \midrule
-% Yu et al. (2018)\cite{yuShipArrivalPrediction2018} & Data engineering & RF, ANN, CART & Port call data, vessel features & RF & Predict ETA using classification approach \\
-
-% Chu et al. (2024b)\cite{chuEvaluationPredictionPunctuality2023} & Data engineering & RF, ANN, RNN, CART & Port call data, vessel features & RF & ETA prediction based on vessel-reported AIS \\
-
-% Lei et al. (2024)\cite{leiPredictingVesselArrival2024} & Data engineering & RF, LSTM, XGBoost, LightGBM & AIS data & LightGBM & Inland ETA prediction with traffic flow integration \\
-
-% Park et al. (2021)\cite{parkVesselEstimatedTime2021}  & Vessel trajectory & RL & AIS data & RL & Trajectory reconstruction and path finding method \\
-
-% Wenzel et al. (2023)\cite{wenzelNeuralNetworkApproach2023} & Vessel trajectory & ANN, CNN, LSTM, RNN & AIS data & LSTM & Vessel travel distance evaluation with A* algorithm \\
-
-% Yoon et al. (2023)\cite{yoonEnhancingContainerVessel2023} & Vessel trajectory & Interpolation method & AIS data & Interpolation & ETA prediction using voyage route patterns \\
-
-% El Mekkaoui et al. (2023)\cite{elmekkaouiDeepLearningModels2022} & Vessel trajectory & CNN, LSTM, ANN, RNN & AIS data & LSTM & First bulk vessel ETA prediction study \\
-
-% Kolley et al. (2023)\cite{kolleyRobustBerthScheduling2022} & Vessel trajectory & LR, DT, ANN, KNN & AIS data & KNN & Berth scheduling integration evaluation \\
-
-% Du et al. (2025)\cite{duSegmentedETAPrediction2025} & Vessel trajectory & CNN, LSTM, GRU, TCN & AIS data, pilotage records & TCN & Pilotage area ETA prediction \\
-% \bottomrule
-% \end{tabular}
-% \end{table*}
+\subsection{Trajectory-tracking Methods for Vessel ETA Prediction}
+Trajectory-tracking methods use AIS positions, vessel states, and operational covariates to estimate ETA directly from observed movement patterns.
+Early operational studies showed that machine-learned ETA can support terminal decisions: Yu et al.~\cite{yuShipArrivalPrediction2018} used RF, ANN, and CART models for ship arrival prediction, while Chu et al.~\cite{chuEvaluationPredictionPunctuality2023} evaluated vessel-reported AIS and port-call information for arrival punctuality prediction.
+The branch has since evolved toward multi-source fusion and ensemble learning.
+Kolley et al.~\cite{kolleyRobustBerthScheduling2022} integrated machine-learned ETA into robust berth scheduling, Lei et al.~\cite{leiPredictingVesselArrival2024} incorporated inland-waterway factors through tree-based stacking, Chu et al.~\cite{chuVesselArrivalTime2025} fused port-call records with AIS trajectories, and Saber et al.~\cite{saberHighaccuracyPredictionVessels2025} combined Extra Trees and LightGBM for seaport ETA prediction.
+Deep learning has also been explored in this branch: El Mekkaoui et al.~\cite{elmekkaouiDeepLearningModels2022} compared CNN, LSTM, ANN, and RNN models for bulk-port ETA prediction, and Du et al.~\cite{duSegmentedETAPrediction2025} proposed a segmented deep-learning approach using AIS and pilotage records.
+These studies confirm that trajectory states, operational covariates, and feature engineering are central to vessel ETA prediction.
 
 \subsection{Research Gaps in Existing ETA Prediction Studies}
-The literature shows clear progress but lacks a unified benchmark comparing model families for full-voyage open-ocean ETA prediction~\cite{jiangPredictionVesselArrival2025,nomanReviewVesselTime2025}. Existing studies are fragmented across port areas, inland waterways, and near-arrival settings, making it unclear whether gains come from model architecture or experimental design differences. These gaps motivate the present study, which evaluates ten models under a unified protocol to clarify which modeling ingredients are genuinely useful for long trans-Pacific voyages.
+The literature shows clear progress, but several gaps remain for full-voyage open-ocean ETA prediction.
+First, path-based methods preserve route geometry, yet they often rely on relatively regular historical routes, port approaches, inland waterways, or route segments close to the destination.
+Second, trajectory-tracking methods achieve practical performance across many operational settings, but spatial information is usually represented as input features or temporal states rather than as an explicit geospatial structure.
+Third, existing studies are fragmented across port, inland-waterway, pilotage, and near-arrival scenarios, making it difficult to compare representative prediction pipelines under a shared full-voyage protocol.
+These gaps motivate our study of trans-Pacific vessel ETA prediction as geospatial forecasting over AIS trajectories, where ocean grid cells, observed AIS transitions, and geographic adjacency are used to construct a route graph and evaluate which modeling ingredients are useful for long-distance maritime ETA prediction.
 
 \section{Methodology}
 
@@ -164,213 +154,6 @@ The literature shows clear progress but lacks a unified benchmark comparing mode
 Given a vessel's historical AIS trajectory $\mathbf{X} = \{x_1, x_2, \ldots, x_T\}$, where each observation $x_t \in \mathbb{R}^{d}$ contains $d$-dimensional navigation and meteorological features at time step $t$, the objective is to predict the remaining sailing time $\hat{y} \in \mathbb{R}^{+}$ to the end of the current voyage segment---i.e., the time until the vessel completes its active open-sea transit and arrives at its next port of call.
 We focus exclusively on the in-transit sailing phase, where the vessel's dynamics are governed by speed, heading, ocean currents, and weather conditions. Port-dwell time (berth waiting, cargo handling, customs processing) is excluded from the prediction target because it depends on logistical factors that are unobservable from AIS data alone.
 
-% \subsection{System Architecture}
-
-% The prediction system consists of two stages, as illustrated in Fig.~\ref{fig:architecture}:
-
-% \begin{enumerate}
-%     \item \textbf{Data Preprocessing}: Raw AIS records are cleaned, segmented into individual voyages via speed-based port-stop detection, augmented with meteorological features, and organized into fixed-length input sequences.
-%     \item \textbf{Sailing Time Prediction}: One of ten candidate models processes the input sequences to predict the remaining sailing time for the current voyage segment.
-% \end{enumerate}
-
-% \begin{figure*}[t]
-% \centering
-% \begin{tikzpicture}[
-%     node distance=0.5cm and 0.6cm,
-%     box/.style={draw, rounded corners=2pt, minimum height=0.7cm, text centered, font=\footnotesize},
-%     data/.style={box, fill=blue!8, minimum width=2.0cm},
-%     proc/.style={box, fill=orange!12, minimum width=2.4cm},
-%     feat/.style={box, fill=green!10, minimum width=2.4cm},
-%     graph/.style={box, fill=violet!10, minimum width=2.4cm},
-%     fuse/.style={box, fill=yellow!15, minimum width=2.4cm},
-%     outnode/.style={box, fill=red!8, minimum width=1.8cm, font=\footnotesize\bfseries},
-%     kd/.style={box, fill=cyan!10, minimum width=2.4cm, dashed},
-%     arr/.style={-{Stealth[length=5pt]}, thick},
-%     darr/.style={-{Stealth[length=5pt]}, thick, dashed, gray},
-%     lbl/.style={font=\scriptsize, text=black!70},
-% ]
-
-% % === Row 0: Data sources ===
-% \node[data] (ais) {Raw AIS Stream};
-% \node[data, right=2.8cm of ais] (wx) {Weather Data};
-% \node[data, right=2.8cm of wx] (graph_data) {Historical Trajectories};
-
-% % === Row 1: Preprocessing ===
-% \node[proc, below=0.8cm of $(ais)!0.5!(wx)$] (preproc) {\begin{tabular}{c}Voyage Extraction \& Cleaning\\\scriptsize Speed-based segmentation, filtering, normalization\end{tabular}};
-
-% % === Row 2: Sequence output ===
-% \node[feat, below=0.5cm of preproc, minimum width=3.2cm] (seq) {AIS Sequence ($48 \times 11$)};
-
-% % Arrows: data -> preproc
-% \draw[arr] (ais.south) -- ++(0,-0.15) -| (preproc.north -| preproc.west);
-% \draw[arr] (wx.south) -- ++(0,-0.15) -| (preproc.north -| preproc.east);
-
-% \draw[arr] (preproc) -- (seq);
-
-% % === Row 3: Two branches ===
-% % Left: Statistical branch
-% \node[feat, below left=1.2cm and 1.8cm of seq] (stat) {\begin{tabular}{c}Statistical Features\\\scriptsize 7 aggs $\times$ 11 feats = 77-d\end{tabular}};
-% \node[feat, below=0.4cm of stat] (cross) {\begin{tabular}{c}Cross-Features (4-d)\\\scriptsize SOG$\times$dist, dist$^2$, \ldots\end{tabular}};
-
-% % Right: Graph branch
-% \node[graph, below right=1.2cm and 1.8cm of seq] (rgraph) {\begin{tabular}{c}Route Graph $\mathcal{G}(\mathcal{V}, \mathcal{E})$\\\scriptsize $2^\circ{\times}2^\circ$ grid, 1,541 nodes\end{tabular}};
-% \node[graph, below=0.4cm of rgraph] (gcn) {\begin{tabular}{c}2-Layer GCN\\\scriptsize $9 \to 64 \to 32$-d embeddings\end{tabular}};
-% \node[graph, below=0.4cm of gcn] (cell_emb) {\begin{tabular}{c}Cell Embeddings ($32{\times}3$)\\\scriptsize current + origin + route mean\end{tabular}};
-
-% % Arrows for branches
-% \draw[arr] (seq.south) -- ++(0,-0.25) -| (stat.north);
-% \draw[arr] (stat) -- (cross);
-% \draw[arr] (seq.south) -- ++(0,-0.25) -| (rgraph.north);
-% \draw[arr] (graph_data.south) -- ++(0,-1.0) -| ([xshift=0.5cm]rgraph.east) -- (rgraph.east);
-% \draw[arr] (rgraph) -- (gcn);
-% \draw[arr] (gcn) -- (cell_emb);
-
-% % === Row 4: Fusion ===
-% \node[fuse, below=1.2cm of $(cross.south)!0.5!(cell_emb.south)$, minimum width=3.0cm] (concat) {Concatenation (81 + 96 = 177-d)};
-
-% \draw[arr] (cross.south) -- ++(0,-0.2) -| (concat.north -| concat.west);
-% \draw[arr] (cell_emb.south) -- ++(0,-0.2) -| (concat.north -| concat.east);
-
-% % === Row 5: MLP Head ===
-% \node[proc, below=0.5cm of concat] (mlp) {\begin{tabular}{c}MLP Head\\\scriptsize $512 \to 256 \to 128 \to 1$, BN, Dropout\end{tabular}};
-% \draw[arr] (concat) -- (mlp);
-
-% % === Row 6: Output ===
-% \node[outnode, below=0.5cm of mlp] (yhat) {$\hat{y}$ (remaining hours)};
-% \draw[arr] (mlp) -- (yhat);
-
-% % === KD box (right side) ===
-% \node[kd, right=1.5cm of mlp, minimum width=3.0cm] (ens) {\begin{tabular}{c}Teacher Ensemble\\\scriptsize Top-7 of 15 seeds (Ens7)\end{tabular}};
-% \node[kd, below=0.4cm of ens, minimum width=3.0cm] (soft) {\begin{tabular}{c}Soft Targets $\hat{y}^{\text{soft}}$\\\scriptsize $\frac{1}{K}\sum_k f_k(\mathbf{x})$\end{tabular}};
-% \node[kd, below=0.4cm of soft, minimum width=3.0cm] (kdloss) {\begin{tabular}{c}KD Loss\\\scriptsize $(1{-}\alpha)\cdot\text{MSE}(\hat{y},y) + \alpha\cdot\text{MSE}(\hat{y},\hat{y}^{\text{soft}})$\end{tabular}};
-
-% \draw[darr] (ens) -- (soft);
-% \draw[darr] (soft) -- (kdloss);
-% \draw[darr] (kdloss.west) -- (yhat.east);
-
-% % === Background boxes ===
-% \begin{scope}[on background layer]
-%     \node[draw=green!50!black, dashed, rounded corners=4pt, inner sep=8pt,
-%           fit=(stat)(cross)] (stat_box) {};
-%     \node[draw=violet!60!black, dashed, rounded corners=4pt, inner sep=8pt,
-%           fit=(rgraph)(gcn)(cell_emb)] (graph_box) {};
-%     \node[draw=cyan!60!black, dashed, rounded corners=4pt, inner sep=8pt,
-%           fit=(ens)(soft)(kdloss)] (kd_box) {};
-% \end{scope}
-% % Labels above boxes
-% \node[font=\scriptsize, text=green!50!black, above=1pt of stat_box.north, fill=white, inner sep=2pt] {Statistical Branch};
-% \node[font=\scriptsize, text=violet!60!black, above=1pt of graph_box.north, fill=white, inner sep=2pt] {Spatial Branch (GCN)};
-% \node[font=\scriptsize, text=cyan!60!black, above=1pt of kd_box.north, fill=white, inner sep=2pt] {Knowledge Distillation};
-
-% \end{tikzpicture}
-% \caption{Architecture of the proposed MSTGN-KD system. Raw AIS and weather data are preprocessed into 48-step sequences. The statistical branch extracts 81 aggregated features plus 4 cross-features; the spatial branch constructs a route graph and produces GCN cell embeddings. Both are fused and fed through an MLP head. During training, an ensemble teacher provides soft targets via knowledge distillation (dashed lines).}
-% \label{fig:architecture}
-% \end{figure*}
-
-% \subsection{Input Representation}
-
-% Each input sequence consists of $L_{\text{enc}} = 48$ consecutive AIS observations.
-% At each time step $t$, the feature vector $x_t \in \mathbb{R}^{11}$ comprises:
-
-% \begin{itemize}
-%     \item \textbf{Navigation features} ($d_{\text{nav}} = 6$): latitude, longitude, speed over ground (SOG), course over ground (COG), great-circle distance to destination ($\text{dist\_km}$), and bearing difference ($\Delta\theta$) between COG and the bearing toward the destination.
-%     \item \textbf{Meteorological features} ($d_{\text{wx}} = 5$): temperature, wind speed, wind level, mean sea-level pressure (PRMSL), and visibility.
-% \end{itemize}
-
-% The distance to destination and bearing difference are computed using the Haversine formula:
-% \begin{equation}
-%     d = 2R \arcsin\!\left(\sqrt{\sin^2\!\frac{\Delta\phi}{2} + \cos\phi_1 \cos\phi_2 \sin^2\!\frac{\Delta\lambda}{2}}\right)
-%     \label{eq:haversine}
-% \end{equation}
-% where $R = 6{,}371$ km is the Earth's radius, $\phi$ denotes latitude, and $\lambda$ denotes longitude.
-
-% Navigation features undergo min-max normalization to $[0, 1]$ with clipping at $[-0.5, 1.5]$ to handle out-of-distribution test samples.
-% The target variable (remaining hours) is transformed via log-standardization: $\tilde{y} = (\ln(1+y) - \mu) / \sigma$, where $\mu$ and $\sigma$ are computed from the training set.
-
-% \subsection{Voyage Extraction and Port-Stop Detection}
-% \label{sec:voyage_extraction}
-
-% Extracting individual voyages from the continuous AIS stream is a critical preprocessing step.
-% We employ a speed-based segmentation approach with the following criteria:
-
-% \begin{enumerate}
-%     \item \textbf{Stop detection}: A vessel is classified as \textit{stopped} when its SOG falls below $\tau_{\text{stop}} = 0.3$~knots. The binary stop indicator $s_t = \mathbb{1}[\text{SOG}_t < \tau_{\text{stop}}]$ is computed for each AIS record. Consecutive records with the same stop state are grouped into segments via cumulative sum of state changes.
-%     \item \textbf{Stop validation}: A stopped segment is considered a valid \textit{port stop} only if its duration exceeds $T_{\text{min\_stop}} = 2$~hours, filtering out brief anchorages and speed measurement noise.
-%     \item \textbf{Sailing segment filtering}: Sailing segments between successive port stops are retained only if they satisfy: duration $\geq T_{\text{min\_sail}} = 6$~hours and number of AIS records $\geq N_{\text{min}} = 50$. This eliminates short harbor maneuvers and data-sparse segments.
-%     \item \textbf{Trans-Pacific filtering}: To focus on the target route, we retain only voyages connecting Asian ports (longitude $> 100^\circ$E or $< 150^\circ$W) to U.S.\ West Coast ports ($-130^\circ < \text{lon} < -115^\circ$), identified by the geographic coordinates of voyage endpoints.
-%     \item \textbf{Duration filtering}: Voyages exceeding 720 hours (30 days) are excluded as likely erroneous or multi-stop itineraries.
-% \end{enumerate}
-
-% This pipeline yields 9,087 valid voyages from 3,940 unique vessels.
-
-% \subsection{Model Selection Rationale}
-% \label{sec:model_selection}
-
-% Following the architectural taxonomy proposed by recent deep time-series forecasting surveys~\cite{kim2025comprehensive, zeng2023transformers}, we select ten models covering five major families to ensure a comprehensive and systematic comparison:
-
-% \begin{enumerate}
-%     \item \textbf{Recurrent models} capture sequential dependencies through hidden state propagation. We include \textit{LSTM}~\cite{hochreiter1997lstm} and \textit{GRU}~\cite{cho2014gru}, the two most widely adopted variants, to evaluate whether gating mechanisms provide meaningful advantages.
-
-%     \item \textbf{Convolutional models} extract local temporal patterns through learnable filters. We include \textit{1D-CNN} (standard multi-layer convolutional network) and \textit{TCN}~\cite{bai2018tcn} (dilated causal convolutions with exponentially growing receptive fields), representing the two dominant convolutional paradigms.
-
-%     \item \textbf{Attention-based models} use self-attention to capture long-range dependencies. We include a \textit{Vanilla Transformer}~\cite{vaswani2017attention} (encoder-only with average pooling), a \textit{Conv-Transformer} hybrid (CNN feature extraction followed by Transformer encoding), and the \textit{Informer}~\cite{zhou2021informer} (ProbSparse attention with distilling). This family receives the most representatives given its recent prominence in the literature.
-
-%     \item \textbf{Tree-based models} operate on tabular feature representations. We include \textit{XGBoost}~\cite{chen2016xgboost}, the dominant gradient-boosted tree method, which requires hand-crafted statistical features extracted from the 48-step input window (last-step values, means, standard deviations, and deltas).
-
-%     \item \textbf{Feedforward models} serve as non-sequential baselines. We include a \textit{multi-layer perceptron (MLP)} operating on flattened input vectors, and \textit{Ridge Regression} ($L_2$-regularized linear regression on summary statistics) as the simplest baseline.
-
-%     \item \textbf{Graph-enhanced models} incorporate spatial structure through graph neural networks. We propose the \textit{Maritime Spatio-Temporal Graph Network (MSTGN)}, which constructs a route graph over discretized ocean grid cells and uses GCN-derived spatial embeddings to augment prediction. We evaluate multiple MSTGN variants to disentangle the contributions of graph features, temporal modeling, and statistical features.
-% \end{enumerate}
-
-% \subsection{Model Configurations}
-
-% Table~\ref{tab:model_configs} summarizes the configuration and parameter counts for all models.
-% All neural models use the same input representation (48$\times$11 feature sequences) except XGBoost and Ridge, which operate on hand-crafted tabular features.
-
-% \begin{table}[t]
-%     \centering
-%     \caption{Model Configurations and Parameter Counts}
-%     \label{tab:model_configs}
-%     \begin{tabular}{llr}
-%         \toprule
-%         \textbf{Model} & \textbf{Key Configuration} & \textbf{Params} \\
-%         \midrule
-%         Ridge & $L_2$ regularization & -- \\
-%         MLP & $512{\to}256{\to}128$, BN, dropout & 270K \\
-%         XGBoost & 500 rounds, GPU hist & -- \\
-%         \midrule
-%         LSTM & 2 layers, $h{=}256$ & 802K \\
-%         GRU & 2 layers, $h{=}256$ & 610K \\
-%         \midrule
-%         1D-CNN & 3 Conv1d, MaxPool, AvgPool & 350K \\
-%         TCN & 4 dilated blocks $[128,128,256,256]$ & 600K \\
-%         \midrule
-%         Transformer & 3 enc layers, $d{=}256$, 8 heads & 1.6M \\
-%         Conv-Trans. & 2 Conv1d $+$ 2 enc layers, $d{=}256$ & 1.5M \\
-%         Informer & 2 enc $+$ 1 dec, $d{=}512$, ProbSparse & 11.3M \\
-%         \midrule
-%         MSTGN-MLP & Stats(44) + 2-layer GCN, $d_\text{cell}{=}32$ & 238K \\
-%         MSTGN-MLP2 & Stats(81) + 2-layer GCN + cross-feats & 273K \\
-%         MSTGN-Late & GRU + GCN late fusion & 737K \\
-%         StatMLP & Stats 44-dim, $256{\to}128{\to}64$ & 189K \\
-%         \bottomrule
-%     \end{tabular}
-% \end{table}
-
-% \subsubsection{Informer Architecture Details}
-
-% Among the evaluated models, the Informer~\cite{zhou2021informer} has the most complex architecture.
-% Its key innovations include:
-% (1) ProbSparse self-attention, which identifies the most informative queries through a KL-divergence-based sparsity measure, reducing attention complexity to $O(L \log L)$;
-% (2) self-attention distilling, which progressively halves the sequence length through Conv1d + MaxPool operations between encoder layers;
-% and (3) a generative-style decoder that produces predictions in a single forward pass.
-
-% The input embedding combines three components:
-% \begin{equation}
-%     \mathbf{X}_{\text{feed}}^{(t)} = \alpha \, \mathbf{u}_t + \text{PE}_{t} + \sum_{p} \text{SE}_{t}^{(p)}
-%     \label{eq:embedding}
-% \end{equation}
-% where $\mathbf{u}_t$ is the scalar projection of raw features through a 1D convolution ($d \to d_{\text{model}}$); $\text{PE}_{t}$ is fixed sinusoidal positional encoding; and $\text{SE}_{t}^{(p)}$ are learnable temporal embeddings for each granularity $p \in \{\text{minute, hour, weekday, day, month}\}$.
 
 \subsection{Data Preparation and System Overview}
 \label{sec:voyage_extraction}
@@ -537,90 +320,6 @@ All neural models use the same $48 \times 11$ sequence input, whereas XGBoost an
 
 Among the evaluated attention models, Informer follows the original ProbSparse-attention and distilling design~\cite{zhou2021informer}. Since it serves as a baseline rather than the main proposed method, we omit further architectural detail here.
 
-% \subsection{Maritime Route Graph Construction}
-% \label{sec:route_graph}
-
-% To incorporate spatial structure into ETA prediction, we construct a maritime route graph $\mathcal{G} = (\mathcal{V}, \mathcal{E})$ from historical AIS trajectories.
-% The ocean surface is discretized into $2^\circ \times 2^\circ$ grid cells.
-% A cell is retained as a node if it contains at least 50 AIS observations, yielding $|\mathcal{V}| = 1{,}541$ active nodes (plus one \textit{unknown} node for rare out-of-distribution cells).
-% Edges are constructed from two sources:
-% \begin{itemize}
-%     \item \textbf{Transition edges}: If consecutive AIS records from any voyage occupy cells $v_i$ and $v_j$, a directed edge $(v_i, v_j)$ is added, weighted by the log-transformed transition count.
-%     \item \textbf{Geographic edges}: Undirected edges connect cells sharing a border (8-connectivity), providing structural continuity even where transition data is sparse.
-% \end{itemize}
-% The resulting graph has 4{,}772 transition edges and 2{,}110 geographic edges (13{,}033 non-zero entries in the symmetrized adjacency matrix).
-% Each node $v \in \mathcal{V}$ is assigned a 9-dimensional feature vector: mean SOG, SOG standard deviation, mean temperature, mean wind speed, mean pressure, mean visibility, log vessel count, and normalized center coordinates (latitude, longitude).
-
-% \subsection{MSTGN Architecture}
-% \label{sec:mstgn}
-
-% The MSTGN processes the route graph and input trajectory through two parallel branches that are fused for the final prediction.
-
-% \paragraph{Design philosophy.}
-% We emphasize that MSTGN is best understood as a \textit{graph-augmented statistical feature fusion model} rather than an end-to-end deep spatio-temporal network in the vein of ST-GCN or ASTGCN~\cite{daiHybridSpatiotemporalGraph2020}.
-% The GCN component does not model sequential propagation of vessel state across the graph; instead, it produces a static lookup table of spatial context embeddings that are appended to statistical features at prediction time.
-% This design choice reflects an empirical finding discussed in Section~\ref{sec:graph_ablation}: for single-step ETA regression with a compact input window, compact spatial context features outperform complex end-to-end spatial-temporal architectures.
-% The contribution of MSTGN is thus correctly attributed to three separable sources: (1)~\textit{statistical feature engineering} as the dominant factor, (2)~\textit{graph-derived spatial context} as a consistent but marginal supplementary signal, and (3)~\textit{ensemble knowledge distillation} as a principled compression strategy.
-% We design ablation experiments in Section~\ref{sec:ablations} to quantify each of these contributions, including a direct comparison of XGBoost with GCN embeddings to isolate the contribution of the neural fusion head.
-
-% \paragraph{Spatial branch (GCN).}
-% A two-layer Graph Convolutional Network~\cite{kipf2017gcn} produces cell embeddings from the route graph:
-% \begin{equation}
-%     \mathbf{H}^{(l+1)} = \sigma\!\left(\hat{\mathbf{A}} \, \mathbf{H}^{(l)} \mathbf{W}^{(l)} + \mathbf{b}^{(l)}\right)
-% \end{equation}
-% where $\hat{\mathbf{A}} = \tilde{\mathbf{D}}^{-1/2} \tilde{\mathbf{A}} \, \tilde{\mathbf{D}}^{-1/2}$ is the symmetrically normalized adjacency matrix, and $\sigma$ is ReLU.
-% The GCN maps the 9-dimensional node features through hidden dimension 64 to a 32-dimensional embedding space.
-% For each input sequence, the last-step grid cell is looked up to retrieve its embedding $\mathbf{z}_\text{cell} \in \mathbb{R}^{32}$.
-
-% \paragraph{Temporal/statistical branch.}
-% We evaluate two strategies for extracting features from the 48-step input sequence:
-% \begin{itemize}
-%     \item \textbf{GRU encoder}: A 2-layer GRU ($h{=}256$) with attention pooling over hidden states, producing a fixed-length representation.
-%     \item \textbf{Statistical features}: Following the XGBoost feature set, we extract last-step values, channel means, standard deviations, and first-last differences from the 48-step window, yielding a compact 44-dimensional vector processed by a 3-layer MLP ($256{\to}128{\to}64$).
-% \end{itemize}
-
-% \paragraph{Fusion and prediction.}
-% The spatial embedding $\mathbf{z}_\text{cell}$ is concatenated with the temporal/statistical representation and passed through a 2-layer prediction head ($128{\to}64{\to}1$) to produce the final ETA estimate.
-
-% We evaluate five MSTGN variants to isolate each component's contribution:
-% \begin{itemize}
-%     \item \textbf{MSTGN-MLP}: Statistical features (44-dim) + GCN cell embeddings (no sequence modeling).
-%     \item \textbf{MSTGN-MLP2}: Enriched statistical features (81-dim) + 3 graph contexts + cross-features.
-%     \item \textbf{MSTGN-LateFusion}: GRU on raw features, GCN embedding fused only at the output layer.
-%     \item \textbf{StatMLP}: Statistical features only, no graph (ablation baseline).
-%     \item \textbf{MSTGN-GRU}: GRU with cell embeddings concatenated to every input timestep.
-% \end{itemize}
-
-% \paragraph{Enriched feature representation (MSTGN-MLP2).}
-% To close the performance gap with XGBoost, we extend the MSTGN-MLP feature set from 44 dimensions to 81 dimensions:
-% \begin{itemize}
-%     \item \textbf{7 aggregations} (vs.\ 4 originally): last-step, mean, standard deviation, first-last difference, minimum, maximum, and recent-12-step mean, computed across all 11 features ($7 \times 11 = 77$ features).
-%     \item \textbf{4 cross-features}: $\text{SOG} \times \text{dist}$, $\text{dist}^2$, $\text{SOG} \times \Delta\theta$, and $\Delta\text{SOG} \times \text{dist}$, capturing nonlinear feature interactions.
-%     \item \textbf{3 graph contexts}: current-cell embedding, origin-cell embedding, and mean route embedding (averaging embeddings along the trajectory).
-% \end{itemize}
-% The MLP head is expanded to $512 \to 256 \to 128 \to 1$ (273K parameters) with BatchNorm and 10\% dropout.
-
-% \paragraph{Ensemble strategy.}
-% To leverage the stochastic nature of neural network training, we train multiple MSTGN-MLP2 models with identical hyperparameters but different random seeds.
-% Each model converges to a different local minimum, producing diverse predictions.
-% At inference time, we average the predictions of the top-$K$ models (selected by validation loss) to form the ensemble prediction:
-% \begin{equation}
-%     \hat{y}_{\text{ens}} = \frac{1}{K} \sum_{k=1}^{K} \hat{y}^{(k)}
-% \end{equation}
-% We train 15 models (seeds 42--56) and report results for $K \in \{5, 7, 15\}$; the top-7 ensemble (MSTGN-Ens7) achieves the best MAE.
-
-% \paragraph{Knowledge distillation.}
-% While the ensemble achieves the best raw accuracy, deploying 7 models at inference time is impractical.
-% We therefore apply \textit{ensemble knowledge distillation}~\cite{hinton2015distilling} to compress the ensemble's knowledge into a single model.
-% The teacher ensemble generates soft targets $\hat{y}^{\text{soft}}_i = \frac{1}{K}\sum_{k=1}^{K} f_k(\mathbf{x}_i)$ for every training sample.
-% The student MSTGN-MLP2 is then trained with a combined loss:
-% \begin{equation}
-%     \mathcal{L} = (1-\alpha) \cdot \mathcal{L}_{\text{MSE}}(\hat{y}, y) + \alpha \cdot \mathcal{L}_{\text{MSE}}(\hat{y}, \hat{y}^{\text{soft}})
-%     \label{eq:kd_loss}
-% \end{equation}
-% where $\alpha \in [0, 1]$ balances between fitting ground-truth labels and mimicking the ensemble's predictions.
-% The soft targets encode richer information than hard labels: they capture the ensemble's confidence and implicit uncertainty, acting as a form of label smoothing that regularizes the student model.
-% We find that $\alpha = 0.6$ yields the best results (see Section~\ref{sec:kd_ablation}).
 \subsection{Maritime Route Graph and MSTGN}
 \label{sec:mstgn}
 
