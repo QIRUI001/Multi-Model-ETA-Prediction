@@ -437,31 +437,56 @@ Fig.~\ref{fig:analysis} examines the best single model, MSTGN-KD ($\alpha{=}0.6$
 \end{figure*}
 Table~\ref{tab:lit_comparison} is a positioning table, not a direct numerical comparison---routes, target definitions, and protocols differ substantially. Most prior studies focus on port areas or near-arrival prediction; even Lloret-Batlle et al.~\cite{lloretbatlle2025} cover only the final $\sim$1{,}500~NM of the trans-Pacific leg. Our full-voyage setting begins at voyage start ($>$5{,}000~NM from port), so a larger absolute MAE is expected.
 
-
 \begin{table*}[t]
     \centering
-    \caption{Recent maritime ETA prediction studies. ``Dist.''~denotes the approximate sailing distance covered by the dataset. Metrics are as reported by the original authors and are \textbf{not directly comparable} due to differences in route type, prediction granularity, and evaluation protocol.}
+    \caption{Scope of recent maritime ETA prediction studies. The table positions this work by route setting and prediction scope; numerical results are not compared because datasets, target definitions, prediction horizons, and evaluation protocols differ.}
     \label{tab:lit_comparison}
     \footnotesize
     \setlength{\tabcolsep}{3pt}
-    \renewcommand{\arraystretch}{1.15}
-    \begin{tabular}{P{2.5cm} P{1.5cm} P{1.7cm} P{1.5cm} P{1.2cm} P{2.0cm} P{3.8cm}}
+    \renewcommand{\arraystretch}{1.08}
+    \begin{tabular}{P{2.5cm} P{2.0cm} P{2.0cm} P{2.7cm} P{5.0cm}}
         \toprule
-        \textbf{Study} & \textbf{Route type} & \textbf{Dist.\ (NM)} & \textbf{Voyages} & \textbf{Models} & \textbf{Best method} & \textbf{Reported result} \\
+        \textbf{Study} & \textbf{Route setting} & \textbf{Prediction scope} & \textbf{Modeling focus} & \textbf{Relation to this work} \\
         \midrule
-        Yu et al.~\cite{yuShipArrivalPrediction2018} & Port call & Short & --- & 3 & RF & Classification-based ETA \\
-        Kolley et al.~\cite{kolleyRobustBerthScheduling2022} & European port & Short & --- & 4 & KNN & Berth scheduling integration \\
-        El~Mekkaoui et al.~\cite{elmekkaouiDeepLearningModels2022} & Bulk port & Short--Med. & --- & 4 & LSTM & First bulk-port DL benchmark \\
-        Du et al.~\cite{duSegmentedETAPrediction2025} & Pilotage area & Short & --- & 4 & TCN & Segmented CNN-LSTM method \\
-        Lei et al.~\cite{leiPredictingVesselArrival2024} & Inland waterway & Short & --- & 4 & LightGBM & Tree-based stacking \\
-        Saber et al.~\cite{saberHighaccuracyPredictionVessels2025} & Seaport & Med. & --- & 4+ & ET+LGB stack & Hybrid stacking, high accuracy \\
-        Chu et al.~\cite{chuVesselArrivalTime2025} & Multi-port & Med. & --- & 5+ & Stacked ens. & Port call + AIS fusion \\
-        Lloret-Batlle et al.~\cite{lloretbatlle2025} & Cross-Pacific & ${\sim}5{,}500$ & --- & 1 & ANN & MAE $\approx$ 4\,h at 1{,}500\,NM from port \\
+        Yu et al.~\cite{yuShipArrivalPrediction2018} & Port call & Short range & RF / ANN / CART & Operational arrival prediction near port. \\
+        Kolley et al.~\cite{kolleyRobustBerthScheduling2022} & European port & Short range & ML ETA for scheduling & Integrates ETA uncertainty into berth-planning decisions. \\
+        El~Mekkaoui et al.~\cite{elmekkaouiDeepLearningModels2022} & Bulk port & Short--medium range & CNN / LSTM / ANN / RNN & Deep-learning benchmark in a port-centered setting. \\
+        Du et al.~\cite{duSegmentedETAPrediction2025} & Pilotage area & Short range & Segmented deep model & Focuses on near-port/pilotage-stage ETA. \\
+        Lei et al.~\cite{leiPredictingVesselArrival2024} & Inland waterway & Short range & Tree-based stacking & Uses structured operational and waterway factors. \\
+        Saber et al.~\cite{saberHighaccuracyPredictionVessels2025} & Seaport & Medium range & Ensemble trees & Emphasizes high-accuracy port ETA with tabular fusion. \\
+        Chu et al.~\cite{chuVesselArrivalTime2025} & Multi-port & Medium range & Stacked ensemble & Combines port-call records with AIS trajectories. \\
+        Lloret-Batlle et al.~\cite{lloretbatlle2025} & Cross-Pacific & Near-arrival segment & ANN & Studies cross-Pacific ETA, but at a shorter remaining-distance stage. \\
         \midrule
-        \textbf{This work} & \textbf{Cross-Pacific} & $\boldsymbol{\sim}$\textbf{5,500} & \textbf{9,087} & \textbf{16} & \textbf{MSTGN-KD} & \textbf{MAE = 15.13\,h (full voyage)} \\
+        \textbf{This work} & \textbf{Cross-Pacific} & \textbf{Full voyage} & \textbf{Route graph + benchmark + uncertainty} & \textbf{Evaluates full-voyage ETA pipelines over large-scale AIS trajectories and analyzes duration-dependent reliability.} \\
         \bottomrule
     \end{tabular}
 \end{table*}
+
+
+% \begin{table*}[t]
+%     \centering
+%     \caption{Recent maritime ETA prediction studies. ``Dist.''~denotes the approximate sailing distance covered by the dataset. Metrics are as reported by the original authors and are \textbf{not directly comparable} due to differences in route type, prediction granularity, and evaluation protocol.}
+%     \label{tab:lit_comparison}
+%     \footnotesize
+%     \setlength{\tabcolsep}{3pt}
+%     \renewcommand{\arraystretch}{1.15}
+%     \begin{tabular}{P{2.5cm} P{1.5cm} P{1.7cm} P{1.5cm} P{1.2cm} P{2.0cm} P{3.8cm}}
+%         \toprule
+%         \textbf{Study} & \textbf{Route type} & \textbf{Dist.\ (NM)} & \textbf{Voyages} & \textbf{Models} & \textbf{Best method} & \textbf{Reported result} \\
+%         \midrule
+%         Yu et al.~\cite{yuShipArrivalPrediction2018} & Port call & Short & --- & 3 & RF & Classification-based ETA \\
+%         Kolley et al.~\cite{kolleyRobustBerthScheduling2022} & European port & Short & --- & 4 & KNN & Berth scheduling integration \\
+%         El~Mekkaoui et al.~\cite{elmekkaouiDeepLearningModels2022} & Bulk port & Short--Med. & --- & 4 & LSTM & First bulk-port DL benchmark \\
+%         Du et al.~\cite{duSegmentedETAPrediction2025} & Pilotage area & Short & --- & 4 & TCN & Segmented CNN-LSTM method \\
+%         Lei et al.~\cite{leiPredictingVesselArrival2024} & Inland waterway & Short & --- & 4 & LightGBM & Tree-based stacking \\
+%         Saber et al.~\cite{saberHighaccuracyPredictionVessels2025} & Seaport & Med. & --- & 4+ & ET+LGB stack & Hybrid stacking, high accuracy \\
+%         Chu et al.~\cite{chuVesselArrivalTime2025} & Multi-port & Med. & --- & 5+ & Stacked ens. & Port call + AIS fusion \\
+%         Lloret-Batlle et al.~\cite{lloretbatlle2025} & Cross-Pacific & ${\sim}5{,}500$ & --- & 1 & ANN & MAE $\approx$ 4\,h at 1{,}500\,NM from port \\
+%         \midrule
+%         \textbf{This work} & \textbf{Cross-Pacific} & $\boldsymbol{\sim}$\textbf{5,500} & \textbf{9,087} & \textbf{16} & \textbf{MSTGN-KD} & \textbf{MAE = 15.13\,h (full voyage)} \\
+%         \bottomrule
+%     \end{tabular}
+% \end{table*}
 
 Our benchmark compares 16 configurations from six model families under a single shared protocol, so gaps in Table~\ref{tab:main_results} are attributable to model design. MSTGN-KD preserves most of the ensemble gain (15.13 vs.\ 14.95\,h) in a single deployable model without multi-model inference.
 
@@ -747,18 +772,31 @@ Adding the 90th-percentile underestimation error to the point ETA provides 90\% 
 \section{Conclusion}
 %==============================================================
 
-We presented a systematic empirical study of vessel ETA prediction on trans-Pacific routes, encompassing ten baseline models from five architectural families and a novel Maritime Spatio-Temporal Graph Network (MSTGN).
-Our evaluation, conducted on a large-scale AIS dataset with 35.9 million position reports under strictly controlled experimental conditions, reveals several findings of practical significance.
+We studied full-voyage trans-Pacific vessel ETA prediction as a large-scale geospatial forecasting problem over sparse AIS trajectories, open-ocean corridors, and duration-dependent operational uncertainty. Using 35.9 million AIS position reports and 9,087 voyages, we evaluated ten representative ETA prediction pipelines across five model families under a shared preprocessing, splitting, and evaluation protocol. This setting allows us to examine not only average prediction accuracy, but also how route-aware spatial structure, statistical feature design, ensemble knowledge transfer, and uncertainty quantification contribute to long-distance maritime ETA prediction.
 
-First, our proposed MSTGN with enriched statistical features and ensemble knowledge distillation achieves the best single-model performance (MAE = 15.13\,h), surpassing XGBoost (MAE = 15.14\,h) without requiring ensemble inference.
-The teacher ensemble (MSTGN-Ens7, MAE = 14.95\,h) provides the best overall accuracy, demonstrating that multi-seed diversity combined with GCN-derived spatial embeddings is highly effective for maritime ETA prediction.
+First, the results show that strong statistical representations remain difficult to outperform in open-ocean ETA prediction. XGBoost achieves competitive single-model performance with an MAE of 15.14\,h, while the proposed MSTGN with enriched statistical features, GCN-derived spatial context, and ensemble knowledge distillation achieves the best single-model result with an MAE of 15.13\,h. The teacher ensemble, MSTGN-Ens7, obtains the lowest overall error with an MAE of 14.95\,h, suggesting that multi-seed ensemble diversity provides useful supervision for compressing ensemble behavior into a deployable single model.
 
-Second, ablation studies reveal that \textit{statistical feature engineering is the dominant factor}: a simple MLP on 44-dimensional features (15.41\,h) outperforms all GRU-based sequence models (${\geq}16.03$\,h), while graph structure adds marginal improvement. MSTGN is best understood as a \textit{graph-augmented feature fusion model}: the GCN produces spatial context embeddings that supplement hand-crafted statistics rather than modeling end-to-end dynamics. Meteorological features yield 7.1\% MAE improvement; asymmetric loss functions degrade accuracy by up to 17.6\%; self-distillation from a single model is ineffective---confirming that ensemble diversity is necessary for effective knowledge transfer.
+Second, the ablation studies clarify the role of spatial modeling in this task. MSTGN is best interpreted as a graph-augmented feature-fusion framework rather than a purely end-to-end spatio-temporal sequence model. Its route graph represents ocean space through grid cells connected by observed AIS transitions and geographic adjacency, and the GCN branch supplies spatial context embeddings that complement hand-crafted voyage statistics. At the same time, statistical feature engineering remains the dominant predictive component: a simple MLP using 44-dimensional statistical features achieves 15.41\,h MAE and outperforms all GRU-based sequence models (${\geq}16.03$\,h). Meteorological features further improve MAE by 7.1\%, whereas asymmetric loss functions degrade accuracy by up to 17.6\%, and self-distillation from a single model is ineffective in this setting.
 
-Fourth, ensemble-based conformal prediction produces well-calibrated intervals (89.9\% coverage at 90\% target, 8\% narrower than fixed-width alternatives). Duration-specific buffer times (1.5\,h for $<$1-day predictions, 67.8\,h for $>$14-day predictions) provide directly actionable guidance for port operators.
+Third, our reliability analysis shows that operational ETA prediction should include calibrated uncertainty estimates rather than relying only on point predictions. Ensemble-based conformal prediction achieves 89.9\% empirical coverage at the 90\% target level while producing intervals that are 8\% narrower than fixed-width alternatives. The resulting duration-specific buffer times, ranging from 1.5\,h for predictions shorter than one day to 67.8\,h for predictions longer than 14 days, provide practical guidance for port scheduling and risk-aware maritime operations.
 
-These findings provide practical guidance for maritime stakeholders: invest in feature engineering and knowledge distillation before pursuing complex deep architectures, and complement point predictions with conformal intervals for risk-aware scheduling.
-Future work will explore ocean current data integration, multi-step prediction horizons where temporal modeling may provide greater benefit, extending the evaluation to global shipping routes, and improving long-tail calibration through duration-conditioned conformal procedures.
+Overall, these findings suggest that full-voyage maritime ETA prediction benefits from treating vessel movement as geospatial forecasting over route-structured AIS trajectories. For practical deployment, robust statistical features, route-aware spatial context, ensemble knowledge distillation, and conformal uncertainty quantification should be considered jointly. Future work will incorporate ocean current data, investigate multi-step prediction horizons where temporal dynamics may become more important, extend the evaluation to global shipping routes, and improve long-tail calibration through duration-conditioned conformal procedures.
+
+% % \section{Conclusion}
+% %==============================================================
+
+% We presented a systematic empirical study of vessel ETA prediction on trans-Pacific routes, encompassing ten baseline models from five architectural families and a novel Maritime Spatio-Temporal Graph Network (MSTGN).
+% Our evaluation, conducted on a large-scale AIS dataset with 35.9 million position reports under strictly controlled experimental conditions, reveals several findings of practical significance.
+
+% First, our proposed MSTGN with enriched statistical features and ensemble knowledge distillation achieves the best single-model performance (MAE = 15.13\,h), surpassing XGBoost (MAE = 15.14\,h) without requiring ensemble inference.
+% The teacher ensemble (MSTGN-Ens7, MAE = 14.95\,h) provides the best overall accuracy, demonstrating that multi-seed diversity combined with GCN-derived spatial embeddings is highly effective for maritime ETA prediction.
+
+% Second, ablation studies reveal that \textit{statistical feature engineering is the dominant factor}: a simple MLP on 44-dimensional features (15.41\,h) outperforms all GRU-based sequence models (${\geq}16.03$\,h), while graph structure adds marginal improvement. MSTGN is best understood as a \textit{graph-augmented feature fusion model}: the GCN produces spatial context embeddings that supplement hand-crafted statistics rather than modeling end-to-end dynamics. Meteorological features yield 7.1\% MAE improvement; asymmetric loss functions degrade accuracy by up to 17.6\%; self-distillation from a single model is ineffective---confirming that ensemble diversity is necessary for effective knowledge transfer.
+
+% Fourth, ensemble-based conformal prediction produces well-calibrated intervals (89.9\% coverage at 90\% target, 8\% narrower than fixed-width alternatives). Duration-specific buffer times (1.5\,h for $<$1-day predictions, 67.8\,h for $>$14-day predictions) provide directly actionable guidance for port operators.
+
+% These findings provide practical guidance for maritime stakeholders: invest in feature engineering and knowledge distillation before pursuing complex deep architectures, and complement point predictions with conformal intervals for risk-aware scheduling.
+% Future work will explore ocean current data integration, multi-step prediction horizons where temporal modeling may provide greater benefit, extending the evaluation to global shipping routes, and improving long-tail calibration through duration-conditioned conformal procedures.
 
 
 %==============================================================
